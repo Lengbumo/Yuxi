@@ -4,8 +4,13 @@
 
 function New-RandomHex($ByteCount) {
     $bytes = [byte[]]::new($ByteCount)
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-    return -join ($bytes | ForEach-Object { $_.ToString("x2") })
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+        return -join ($bytes | ForEach-Object { $_.ToString("x2") })
+    } finally {
+        $rng.Dispose()
+    }
 }
 
 function Test-EnvValue($Name) {

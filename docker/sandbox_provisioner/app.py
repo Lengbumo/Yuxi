@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 SANDBOX_ENV_FILE = Path(__file__).parent / "sandbox.env"
 SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-
+# uvicorn app:app --host 0.0.0.0 --port 8002
 def canonical_backend_name(backend: str) -> str:
     value = (backend or "").strip().lower()
     return value or "memory"

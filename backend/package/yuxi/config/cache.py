@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -13,7 +14,8 @@ from yuxi.utils.logging_config import logger
 
 RUNTIME_CONFIG_REDIS_KEY = "yuxi:runtime_config"
 RUNTIME_CONFIG_SYNC_INTERVAL_SECONDS = 5.0
-_RUNTIME_CONFIG_REDIS_TIMEOUT_SECONDS = 0.2
+# Docker 本地环境延迟极低，0.2s 足够；远程 Redis 需要通过环境变量调大
+_RUNTIME_CONFIG_REDIS_TIMEOUT_SECONDS = float(os.getenv("RUNTIME_CONFIG_REDIS_TIMEOUT", "0.2"))
 
 
 def _runtime_config_redis_config() -> RedisConfig:

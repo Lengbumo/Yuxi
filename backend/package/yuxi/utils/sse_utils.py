@@ -6,6 +6,8 @@ import json
 import os
 
 SSE_HEARTBEAT_SECONDS = int(os.getenv("RUN_SSE_HEARTBEAT_SECONDS", "15"))
+# Compose limits development-server graceful shutdown separately, so a live
+# stream cannot block hot reload for this full connection lifetime.
 SSE_MAX_CONNECTION_MINUTES = int(os.getenv("RUN_SSE_MAX_CONNECTION_MINUTES", "30"))
 SSE_POLL_INTERVAL_SECONDS = float(os.getenv("RUN_SSE_POLL_INTERVAL_SECONDS", "1.0"))
 

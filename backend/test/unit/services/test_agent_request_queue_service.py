@@ -49,14 +49,13 @@ def test_validate_queue_policy_rejects_unknown():
     assert exc_info.value.status_code == 422
 
 
-# ── AgentRunCreate alias ──
+# ── AgentRunCreate request model ──
 
 
-def test_agent_run_create_accepts_thread_id_and_threadId():
+def test_agent_run_create_accepts_thread_id():
     from server.routers.agent_router import AgentRunCreate
 
     assert AgentRunCreate(query="hi", agent_slug="bot", thread_id="t1").thread_id == "t1"
-    assert AgentRunCreate(query="hi", agent_slug="bot", threadId="t2").thread_id == "t2"
 
 
 # ── fixtures ──

@@ -60,7 +60,7 @@ export function useAgentRequestQueue({ getThreadState, startRunStream, onStreamE
     if (!ts) return
 
     ts.requestStreams = ts.requestStreams || {}
-    ts.requestStreams[requestId]?.controller?.abort()
+    if (ts.requestStreams[requestId]) return
 
     const controller = new AbortController()
     const entry = { controller, position: 0, status: 'queued' }

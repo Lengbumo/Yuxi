@@ -826,6 +826,16 @@ const showEditModal = () => {
   editModalVisible.value = true
 }
 
+watch(
+  () => [route.query.action, detailLoading.value, isCurrentDatabaseLoaded.value],
+  ([action, loading, loaded]) => {
+    if (action !== 'edit' || loading || !loaded) return
+    showEditModal()
+    router.replace({ path: route.path, query: { ...route.query, action: undefined } })
+  },
+  { immediate: true }
+)
+
 const handleEditSubmit = () => {
   editFormRef.value
     .validate()

@@ -122,9 +122,9 @@ export function useAgentStreamHandler({
             }
             threadState.onGoingConv.msgChunks[resolvedRequestId] = [initMessage]
           }
+          threadState.replyLoadingVisible = true
+          threadState.contextCompressing = false
         }
-        // 只有在服务端确认 init 后，才展示“正在回复”的加载动画。
-        threadState.replyLoadingVisible = true
         return false
 
       case 'loading':
@@ -174,6 +174,7 @@ export function useAgentStreamHandler({
           threadState.replyLoadingVisible = false
           threadState.pendingRequestId = null
           threadState.pendingInterrupt = null
+          threadState.contextCompressing = false
         }
         return true
 
@@ -217,6 +218,12 @@ export function useAgentStreamHandler({
         }
         return false
 
+      case 'context_compression':
+        if (chunk.compression) {
+          threadState.contextCompressing = chunk.compression.status === 'started'
+        }
+        return false
+
       case 'finished':
         streamSmoother?.flushThread(threadId)
         // 先标记流式结束，但保持消息显示直到历史记录加载完成
@@ -225,6 +232,7 @@ export function useAgentStreamHandler({
           threadState.replyLoadingVisible = false
           threadState.pendingRequestId = null
           threadState.pendingInterrupt = null
+          threadState.contextCompressing = false
           console.log(`${debugPrefix}[finished]`, {
             threadId,
             currentAgentId: unref(currentAgentId),
@@ -256,6 +264,7 @@ export function useAgentStreamHandler({
           threadState.isStreaming = false
           threadState.replyLoadingVisible = false
           threadState.pendingRequestId = null
+          threadState.contextCompressing = false
           const pendingInterrupt = extractPendingInterrupt(chunk, threadId)
           if (pendingInterrupt) {
             threadState.pendingInterrupt = pendingInterrupt

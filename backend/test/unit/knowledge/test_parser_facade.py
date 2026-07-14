@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import fitz
+import pandas as pd
 import pytest
 import yuxi.knowledge.parser.unified as parser_unified
 from docx import Document
@@ -63,6 +65,27 @@ def test_parser_parse_docx_file_returns_markdown_text(tmp_path: Path, monkeypatc
     assert isinstance(markdown, str)
     assert "Parser DOCX content" in markdown
     assert len(markdown.strip()) > 0
+
+
+def test_convert_csv_to_markdown_preserves_column_dtypes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_path = tmp_path / "parser_test.csv"
+    file_path.write_text("id,score\n9007199254740993,2.5\n", encoding="utf-8")
+    captured_dtypes: list[dict[str, object]] = []
+    original_to_markdown = pd.DataFrame.to_markdown
+
+    def _capture_dtypes(dataframe: pd.DataFrame, *args, **kwargs) -> str:
+        captured_dtypes.append(dataframe.dtypes.to_dict())
+        return original_to_markdown(dataframe, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_markdown", _capture_dtypes)
+
+    markdown = parser_unified._convert_csv_to_markdown(file_path)
+
+    assert markdown
+    assert str(captured_dtypes[0]["id"]) == "int64"
 
 
 def test_convert_with_docling_reinserts_image_links_in_document_order(
@@ -209,6 +232,34 @@ async def test_parser_aparse_pdf_file_returns_markdown_text(tmp_path: Path):
     assert "Async" in markdown
     assert "content" in markdown
     assert len(markdown.strip()) > 0
+
+
+@pytest.mark.asyncio
+async def test_parser_aparse_docx_does_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_path = tmp_path / "parser_test_async.docx"
+    file_path.write_bytes(b"fake docx")
+    completion_order: list[str] = []
+
+    def _slow_docling_conversion(*args, **kwargs) -> str:
+        time.sleep(0.1)
+        return "Async DOCX content"
+
+    async def _parse_document() -> None:
+        await Parser.aparse(str(file_path))
+        completion_order.append("parse")
+
+    async def _record_event_loop_progress() -> None:
+        await asyncio.sleep(0.01)
+        completion_order.append("event_loop")
+
+    monkeypatch.setattr(parser_unified, "_convert_with_docling", _slow_docling_conversion)
+
+    await asyncio.gather(_parse_document(), _record_event_loop_progress())
+
+    assert completion_order == ["event_loop", "parse"]
 
 
 def test_parse_pdf_uses_config_default_ocr_when_engine_missing(

@@ -2,22 +2,15 @@
   <div class="user-config-settings">
     <div class="header-section">
       <div class="header-content">
-        <div class="section-title">用户配置(Beta)</div>
-        <p class="section-description">
-          配置当前用户的专属设置。当前为测试预览版，暂未引入新的特性，仅作技术能力拓展。
-        </p>
+        <div class="section-title">用户配置</div>
       </div>
       <div class="header-actions">
         <a-button class="lucide-icon-btn" :loading="loading" @click="loadUserConfig">
           <template #icon><RefreshCw :size="16" :class="{ spin: loading }" /></template>
           刷新
         </a-button>
-        <a-button type="primary" :loading="saving" @click="saveUserConfig">
-          {{ saveButtonText }}
-        </a-button>
       </div>
     </div>
-
     <a-spin :spinning="loading">
       <div class="config-panel">
         <div class="config-row">
@@ -28,7 +21,7 @@
             </div>
             <p class="config-description">当前仅保存配置值，暂不接入智能体运行逻辑。</p>
           </div>
-          <a-switch :checked="draftEnableMemory" @change="draftEnableMemory = Boolean($event)" />
+          <a-switch :checked="draftEnableMemory" @change="handleMemoryChange" />
         </div>
       </div>
     </a-spin>
@@ -45,9 +38,6 @@ const loading = ref(false)
 const saving = ref(false)
 const draftEnableMemory = ref(false)
 const savedEnableMemory = ref(false)
-
-const hasUnsavedChanges = computed(() => draftEnableMemory.value !== savedEnableMemory.value)
-const saveButtonText = computed(() => (hasUnsavedChanges.value ? '保存（有修改）' : '保存'))
 
 const applyResponse = (res) => {
   draftEnableMemory.value = res.enable_memory
@@ -66,12 +56,12 @@ const loadUserConfig = async () => {
   }
 }
 
-const saveUserConfig = async () => {
-  if (!hasUnsavedChanges.value) {
-    message.info('用户配置未变化')
-    return
-  }
+const handleMemoryChange = (val) => {
+  draftEnableMemory.value = Boolean(val)
+  saveUserConfig()
+}
 
+const saveUserConfig = async () => {
   saving.value = true
   try {
     const res = await userConfigApi.update({ enable_memory: draftEnableMemory.value })

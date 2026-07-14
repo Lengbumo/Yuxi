@@ -85,7 +85,8 @@ class MyAgent(BaseAgent):
 | `summary_threshold` | 摘要触发阈值 |
 | `summary_prompt` | 摘要触发时使用的提示词 |
 | `summary_keep_messages` | 摘要后保留的最近消息数 |
-| `summary_tool_result_token_limit` | 摘要阶段工具结果预览上限 |
+| `summary_tool_result_token_limit` | 工具结果 offload 阈值和预览 token 上限 |
+| `summary_l2_trigger_ratio` | L1 后进入 L2 summary 的触发比例 |
 | `max_execution_steps` | 单次运行最大执行步数 |
 | `thread_id` / `uid` | 运行期标识，不作为页面配置项暴露 |
 

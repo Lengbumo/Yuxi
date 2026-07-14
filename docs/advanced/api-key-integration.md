@@ -122,6 +122,28 @@ with requests.get(f"{base_url}{run['stream_url']}", headers=headers, stream=True
 }
 ```
 
+### 读取运行结果
+
+如果不需要逐事件消费 SSE，可以在 run 终态后直接拉取最终结果：
+
+```http
+GET /api/agent/runs/{run_id}/result
+```
+
+返回结构包含运行状态、最终 assistant 输出、Langfuse trace id 和错误信息。该接口只读，不会再次触发 run。对外部系统只关心「最终答案」、不需要展示中间过程的场景，比订阅 SSE 更简单。
+
+### 外部系统调用入口
+
+除通用 `/api/agent/runs` 之外，Yuxi 还提供专为外部系统设计的 `agent-invocation` 路由，复用同一套 AgentRun 队列与结果读取能力：
+
+| 接口 | 用途 | 关键字段 |
+|------|------|----------|
+| `POST /api/agent-invocation/agent-call/runs` | 外部系统调用 Agent；`async_mode=true` 时立即返回 `run_id`，否则阻塞到 run 终态返回结果 | `agent_slug`、`messages`、`thread_id`、`request_id`、`model_spec`、`async_mode` |
+| `POST /api/agent-invocation/agent-call/runs/result` | 读取 agent-call run 的 OpenAI 兼容结果结构 | `run_id`、可选 `agent_slug` |
+| `POST /api/agent-invocation/eval/runs` | 运行一次评估样例，阻塞到 run 终态后返回最终输出与可选轨迹摘要 | `query`、`agent_slug`、`evaluation`、`include_trajectory_summary` |
+
+agent-call 的 `messages[].content` 兼容 OpenAI 风格的 `text`/`image_url` 多模态数组：纯文本数组不会触发 422，图片输入会保留原始 LangChain 多模态消息供 worker 恢复。出于安全考虑，**不允许通过 `agent_call_meta.context` 覆盖 Agent 运行上下文**；运行时模型覆盖只允许走独立 `model_spec` 字段。Agent Eval 通常通过 `yuxi agent eval` CLI 触发，详见[智能体评估](../agents/agent-evaluation.md)。
+
 ## 响应格式
 
 运行事件流采用 Server-Sent Events 格式，响应头为 `text/event-stream`。每个事件包含：

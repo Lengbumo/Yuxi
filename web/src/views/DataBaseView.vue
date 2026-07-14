@@ -220,7 +220,29 @@
         <template #icon>
           <component :is="getKbTypeIcon(database.kb_type || 'milvus')" :size="20" />
         </template>
-        <template #status />
+        <template #card-more-action-corner>
+          <a-menu @click="({ key }) => handleDatabaseAction(key, database)">
+            <a-menu-item key="copy">
+              <span class="lucide-menu-item">
+                <Copy :size="15" />
+                <span>复制 ID</span>
+              </span>
+            </a-menu-item>
+            <a-menu-item key="edit">
+              <span class="lucide-menu-item">
+                <Pencil :size="15" />
+                <span>编辑知识库</span>
+              </span>
+            </a-menu-item>
+            <a-menu-divider />
+            <a-menu-item key="delete" danger>
+              <span class="lucide-menu-item">
+                <Trash2 :size="15" />
+                <span>删除知识库</span>
+              </span>
+            </a-menu-item>
+          </a-menu>
+        </template>
       </InfoCard>
     </ExtensionCardGrid>
   </div>
@@ -233,9 +255,9 @@ import { storeToRefs } from 'pinia'
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
-import { Plus } from 'lucide-vue-next'
-import { message } from 'ant-design-vue'
-import { typeApi } from '@/apis/knowledge_api'
+import { Copy, Pencil, Plus, Trash2 } from 'lucide-vue-next'
+import { message, Modal } from 'ant-design-vue'
+import { databaseApi, typeApi } from '@/apis/knowledge_api'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
@@ -514,6 +536,57 @@ const cardTags = (database) => {
 
 const navigateToDatabase = (database) => {
   router.push({ path: `/extensions/knowledgebase/${database.kb_id}` })
+}
+
+const copyDatabaseId = async (database) => {
+  try {
+    await navigator.clipboard.writeText(database.kb_id)
+  } catch {
+    const textArea = document.createElement('textarea')
+    textArea.value = database.kb_id
+    document.body.appendChild(textArea)
+    textArea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textArea)
+  }
+  message.success('知识库 ID 已复制')
+}
+
+const deleteDatabase = (database) => {
+  Modal.confirm({
+    title: '删除知识库',
+    content: `确定要删除知识库“${database.name}”吗？此操作不可撤销。`,
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: async () => {
+      try {
+        await databaseApi.deleteDatabase(database.kb_id)
+        message.success('知识库已删除')
+        await databaseStore.loadDatabases()
+      } catch (error) {
+        message.error(error.message || '删除失败')
+        throw error
+      }
+    }
+  })
+}
+
+const handleDatabaseAction = (key, database) => {
+  if (key === 'copy') {
+    copyDatabaseId(database)
+    return
+  }
+  if (key === 'edit') {
+    router.push({
+      path: `/extensions/knowledgebase/${database.kb_id}`,
+      query: { action: 'edit' }
+    })
+    return
+  }
+  if (key === 'delete') {
+    deleteDatabase(database)
+  }
 }
 
 watch(

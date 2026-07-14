@@ -11,6 +11,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver, aiosqlite
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.stream.transformers import CustomTransformer
 from langgraph.types import Command
 
 from yuxi import config as sys_config
@@ -225,6 +226,7 @@ class BaseAgent:
             context=context,
             config=input_config,
             version="v3",
+            transformers=[CustomTransformer],
         )
         subagent_routes: dict[tuple[str, ...], dict[str, str]] = {}
         route_task = asyncio.create_task(_collect_subagent_routes(run, context.thread_id, subagent_routes))
@@ -236,6 +238,9 @@ class BaseAgent:
                 data = params.get("data")
                 subagent_route = _subagent_route_for_namespace(subagent_routes, namespace)
 
+                if method == "custom":
+                    yield "custom", data
+                    continue
                 if method == "messages":
                     msg, metadata = data
                     metadata = dict(metadata or {})

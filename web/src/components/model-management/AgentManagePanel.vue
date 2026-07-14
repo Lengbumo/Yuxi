@@ -1,15 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import {
-  Plus,
-  RefreshCw,
-  Trash2,
-  SquarePen,
-  Bot,
-  MoreVertical,
-  MessageCirclePlus
-} from 'lucide-vue-next'
+import { Plus, RefreshCw, Trash2, SquarePen, Bot, MessageCirclePlus } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 
 import { agentApi } from '@/apis/agent_api'
@@ -205,41 +197,26 @@ defineExpose({
               />
             </template>
 
-            <template #status>
-              <a-dropdown v-if="canManageAgent(agent)" :trigger="['click']" placement="bottomRight">
-                <template #overlay>
-                  <a-menu>
-                    <a-menu-item key="edit" @click.stop="openEditAgentModal(agent)">
-                      <span class="agent-card-menu-item">
-                        <SquarePen :size="14" />
-                        编辑智能体
-                      </span>
-                    </a-menu-item>
-                    <a-menu-item
-                      key="delete"
-                      :disabled="isBuiltinAgent(agent)"
-                      @click.stop="deleteAgent(agent)"
-                    >
-                      <span
-                        class="agent-card-menu-item"
-                        :class="{ danger: !isBuiltinAgent(agent) }"
-                      >
-                        <Trash2 :size="14" />
-                        删除智能体
-                      </span>
-                    </a-menu-item>
-                  </a-menu>
-                </template>
-                <a-button
-                  type="text"
-                  size="small"
-                  class="agent-card-menu-trigger"
-                  aria-label="智能体操作"
-                  @click.stop
+            <template v-if="canManageAgent(agent)" #card-more-action-corner>
+              <a-menu>
+                <a-menu-item key="edit" @click.stop="openEditAgentModal(agent)">
+                  <span class="lucide-menu-item">
+                    <SquarePen :size="14" />
+                    <span>编辑智能体</span>
+                  </span>
+                </a-menu-item>
+                <a-menu-item
+                  key="delete"
+                  :disabled="isBuiltinAgent(agent)"
+                  :danger="!isBuiltinAgent(agent)"
+                  @click.stop="deleteAgent(agent)"
                 >
-                  <MoreVertical :size="16" />
-                </a-button>
-              </a-dropdown>
+                  <span class="lucide-menu-item">
+                    <Trash2 :size="14" />
+                    <span>删除智能体</span>
+                  </span>
+                </a-menu-item>
+              </a-menu>
             </template>
 
             <template v-if="group.key === 'agents'" #tags>
@@ -306,40 +283,13 @@ defineExpose({
 }
 
 .agent-card :deep(.info-card-tags) {
-  justify-content: flex-end;
+  justify-content: flex-start;
   margin-top: auto;
-}
-
-.agent-card-menu-trigger {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  color: var(--gray-600);
-
-  &:hover,
-  &:focus {
-    color: var(--gray-700);
-    background: var(--gray-50);
-  }
-}
-
-.agent-card-menu-item {
-  display: flex;
-  align-items: center;
-  min-height: 22px;
-  gap: 8px;
-  line-height: 1;
-
-  &.danger {
-    color: var(--color-error-700);
-  }
 }
 
 .agent-card-actions {
   display: flex;
-  justify-content: flex-end;
+  justify-content: flex-start;
   width: 100%;
   margin-top: auto;
 }

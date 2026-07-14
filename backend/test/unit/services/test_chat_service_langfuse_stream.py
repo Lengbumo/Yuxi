@@ -446,3 +446,84 @@ async def test_stream_agent_chat_emits_realtime_agent_state_from_values(monkeypa
     assert agent_state_chunks[2]["agent_state"]["todos"][0]["status"] == "completed"
     assert all("agent_slug" in chunk.get("meta", {}) for chunk in chunks if isinstance(chunk.get("meta"), dict))
     assert all("agent_id" not in chunk.get("meta", {}) for chunk in chunks if isinstance(chunk.get("meta"), dict))
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_chat_maps_custom_compression_event_to_context_compression_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeGraph:
+        async def aget_state(self, _config):
+            return SimpleNamespace(values={"messages": []})
+
+    class FakeAgent:
+        context_schema = _FakeContext
+
+        async def stream_messages_with_state(self, messages, input_context=None, **kwargs):
+            yield "custom", {"type": "yuxi.context_compression", "status": "started"}
+            yield "messages", (AIMessageChunk(content="hi"), {"node": "llm"})
+            yield "custom", {
+                "type": "yuxi.context_compression",
+                "status": "completed",
+                "cutoff_index": 5,
+                "file_path": "/conv/x.md",
+            }
+
+        async def stream_messages(self, messages, input_context=None, **kwargs):
+            raise AssertionError("stream_messages fallback should not be used")
+
+        async def get_graph(self, *, context=None):
+            return FakeGraph()
+
+    async def fake_resolve_agent_runtime(**_kwargs):
+        return SimpleNamespace(slug="test-agent", backend_id="ChatbotAgent"), FakeAgent(), {}
+
+    async def fake_save_messages_from_langgraph_state(
+        *, agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id=None, request_id=None
+    ):
+        del agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id, request_id
+        return None
+
+    async def fake_guard_check(_content):
+        return False
+
+    async def fake_guard_check_with_keywords(_content):
+        return False
+
+    async def fake_interrupts(agent, langgraph_config, make_chunk, meta, thread_id, context):
+        if False:
+            yield None
+        return
+
+    monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
+    monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
+    monkeypatch.setattr(svc, "ConversationRepository", _FakeConvRepo)
+    monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fake_save_messages_from_langgraph_state)
+    monkeypatch.setattr(svc.content_guard, "check", fake_guard_check)
+    monkeypatch.setattr(svc.content_guard, "check_with_keywords", fake_guard_check_with_keywords)
+    monkeypatch.setattr(svc, "check_and_handle_interrupts", fake_interrupts)
+    monkeypatch.setattr(
+        svc,
+        "_build_langfuse_run_context",
+        lambda **kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[], trace_id=None),
+    )
+    monkeypatch.setattr(svc, "get_trace_info", lambda _run_context: {})
+    monkeypatch.setattr(svc, "flush_langfuse", lambda: None)
+
+    chunks = []
+    async for chunk in svc.stream_agent_chat(
+        agent_slug="test-agent",
+        thread_id="thread-1",
+        meta={"request_id": "req-1"},
+        input_message=build_chat_input_message("hello"),
+        current_user=SimpleNamespace(id=1, uid="user-1", role="user", department_id="dept-1"),
+        db=object(),
+    ):
+        chunks.append(json.loads(chunk.decode("utf-8")))
+
+    compression_chunks = [chunk for chunk in chunks if chunk.get("status") == "context_compression"]
+    assert len(compression_chunks) == 2
+    assert compression_chunks[0]["compression"]["status"] == "started"
+    assert compression_chunks[1]["compression"]["status"] == "completed"
+    assert compression_chunks[1]["compression"]["cutoff_index"] == 5
+    assert compression_chunks[1]["compression"]["file_path"] == "/conv/x.md"

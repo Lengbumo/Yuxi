@@ -42,8 +42,8 @@
     </td>
     <td style="padding: 8px 8px 8px 0; vertical-align: middle;">
       <p style="margin: 0 0 4px 0;">
-        感谢 <a href="https://sui-xiang.com/">随想AI网关</a > 对本项目的赞助！
-        随想AI网关 是一家可靠高效的 API 中继服务提供商，提供 Claude、Codex、Gemini 等的中继服务。注重隐私的中转站·无数据倒卖·无模型掺水，隐私，透明，极速售后。新账户注册每日签到就送 0.5 元测试额度，充值额度 1:1，无需订阅，按量付费。
+        感谢 <a href="https://sui-xiang.com/">随想AI中转站</a > 对本项目的赞助！
+        随想AI中转站 是一家可靠高效的 API 中继服务提供商，提供 Claude、Codex、Gemini 等的中继服务。注重隐私的中转站·无数据倒卖·无模型掺水，隐私，透明，极速售后。新账户注册每日签到就送 0.5 元测试额度，充值额度 1:1，无需订阅，按量付费。
       </p >
     </td>
   </tr>
@@ -67,7 +67,7 @@
 **1. 克隆代码并初始化**
 
 ```bash
-git clone --branch v0.7.0 --depth 1 https://github.com/xerrors/Yuxi.git
+git clone --branch v0.7.1.beta1 --depth 1 https://github.com/xerrors/Yuxi.git
 cd Yuxi
 
 # Linux/macOS

@@ -105,7 +105,10 @@
               :description="skill.description || '暂无描述'"
               :default-icon="BookMarkedIcon"
               @click="handleCardClick(skill)"
-              :class="{ 'card-clickable-select': isBatchDeleteMode && !skill.isRecommendation }"
+              :class="{
+                'card-clickable-select': isBatchDeleteMode && !skill.isRecommendation,
+                'recommendation-card': skill.isRecommendation
+              }"
             >
               <template #action>
                 <button
@@ -895,7 +898,6 @@ const goToPreviewSkillManagement = () => {
 
 const handleCardClick = (skill) => {
   if (skill?.isRecommendation) {
-    if (!isBatchDeleteMode.value) handleRecommendedSkillInstall(skill)
     return
   }
   if (isBatchDeleteMode.value) {
@@ -2083,6 +2085,14 @@ defineExpose({
   .clear-icon {
     display: flex;
     align-items: center;
+  }
+}
+
+:deep(.recommendation-card) {
+  cursor: default;
+  &:hover {
+    border-color: var(--gray-150);
+    background: linear-gradient(45deg, var(--gray-0) 0%, var(--gray-25) 100%);
   }
 }
 </style>

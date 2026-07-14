@@ -329,6 +329,12 @@ def _protocol_event_yuxi_event(
     return None
 
 
+def _context_compression_payload(payload: Any) -> dict | None:
+    if isinstance(payload, dict) and payload.get("type") == "yuxi.context_compression":
+        return payload
+    return None
+
+
 def _stream_event_response(event: dict[str, Any]) -> str:
     if event.get("type") != "message_delta":
         return ""
@@ -924,6 +930,12 @@ async def stream_agent_chat(
                     yield make_chunk(status="agent_state", agent_state=agent_state, meta=meta)
                 continue
 
+            if mode == "custom":
+                compression = _context_compression_payload(payload)
+                if compression is not None:
+                    yield make_chunk(status="context_compression", compression=compression, meta=meta)
+                continue
+
             if mode == "stream_event":
                 yield make_chunk(
                     status="stream_event",
@@ -1179,6 +1191,12 @@ async def stream_agent_resume(
                     meta=meta,
                     thread_id=event_payload.get("thread_id"),
                 )
+                continue
+
+            if mode == "custom":
+                compression = _context_compression_payload(payload)
+                if compression is not None:
+                    yield make_resume_chunk(status="context_compression", compression=compression, meta=meta)
                 continue
 
             if mode != "messages":

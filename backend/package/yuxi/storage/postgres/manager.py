@@ -714,6 +714,20 @@ class PostgresManager(metaclass=SingletonMeta):
             "CREATE INDEX IF NOT EXISTS ix_model_providers_is_enabled ON model_providers(is_enabled)",
         ]
         async with self.async_engine.begin() as conn:
+            # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警
+            # 便于运维凭据失效时回溯；DELETE 之后无法再查询这些 Key。
+            try:
+                unbound_keys_result = await conn.execute(text("SELECT count(*) FROM api_keys WHERE user_id IS NULL"))
+                unbound_keys_count = int(unbound_keys_result.scalar() or 0)
+                if unbound_keys_count > 0:
+                    logger.warning(
+                        f"Schema migration will delete {unbound_keys_count} unbound API key(s) "
+                        "(user_id IS NULL). These keys were previously allowed via dept-admin/superadmin "
+                        "fallback and will stop authenticating after this migration."
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to count unbound api_keys before migration: {exc}")
+
             for stmt in stmts:
                 await conn.execute(text(stmt))
 

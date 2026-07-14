@@ -55,6 +55,23 @@ body {
   flex-shrink: 0;
 }
 
+.lucide-menu-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 22px;
+  line-height: 1;
+}
+
+.lucide-menu-item svg {
+  flex-shrink: 0;
+}
+
+.lucide-menu-item > span {
+  line-height: 20px;
+}
+
 .ant-btn.lucide-icon-btn,
 .lucide-icon-btn.ant-btn {
   display: inline-flex;

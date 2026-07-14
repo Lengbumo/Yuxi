@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
@@ -8,6 +9,10 @@ from sqlalchemy import DateTime, String, case, cast, func, literal, or_, select,
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import KnowledgeFile
 from yuxi.utils.datetime_utils import utc_now_naive
+
+# asyncpg 单条 SQL 参数上限为 32767；按 file_id 批量查询时统一分批，避免
+# mindmap_file_ids 等大尺寸传入触发 `too many parameters` 报错。
+SQL_IN_BATCH_SIZE = 10_000
 
 
 class KnowledgeFileRepository:
@@ -33,6 +38,11 @@ class KnowledgeFileRepository:
         "updated_by",
     }
 
+    @staticmethod
+    def _iter_batches(items: list[str], batch_size: int = SQL_IN_BATCH_SIZE) -> Iterator[list[str]]:
+        for index in range(0, len(items), batch_size):
+            yield items[index : index + batch_size]
+
     @classmethod
     def _sanitize_data(cls, data: dict[str, Any]) -> dict[str, Any]:
         sanitized = {key: value for key, value in data.items() if key in cls._writable_fields}
@@ -56,10 +66,12 @@ class KnowledgeFileRepository:
         if not normalized_ids:
             return []
 
+        records_by_id: dict[str, KnowledgeFile] = {}
         async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id.in_(normalized_ids)))
-            records_by_id = {record.file_id: record for record in result.scalars().all()}
-            return [records_by_id[file_id] for file_id in normalized_ids if file_id in records_by_id]
+            for batch in self._iter_batches(normalized_ids):
+                result = await session.execute(select(KnowledgeFile).where(KnowledgeFile.file_id.in_(batch)))
+                records_by_id.update({record.file_id: record for record in result.scalars().all()})
+        return [records_by_id[file_id] for file_id in normalized_ids if file_id in records_by_id]
 
     async def list_by_kb_id(self, kb_id: str) -> list[KnowledgeFile]:
         async with pg_manager.get_async_session_context() as session:

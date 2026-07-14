@@ -1466,3 +1466,19 @@ async def test_create_resume_run_inherits_parent_model_spec(monkeypatch: pytest.
     )
 
     assert db.created_run_kwargs["input_payload"]["model_spec"] == "parent-model"
+
+
+def test_compact_stream_chunk_retains_compression_field():
+    chunk = {
+        "request_id": "req-1",
+        "response": None,
+        "thread_id": "thread-1",
+        "status": "context_compression",
+        "compression": {"type": "yuxi.context_compression", "status": "started"},
+        "meta": {"uid": "user-1"},
+    }
+
+    compact = agent_run_service._compact_stream_chunk(chunk)
+
+    assert compact["status"] == "context_compression"
+    assert compact["compression"] == {"type": "yuxi.context_compression", "status": "started"}

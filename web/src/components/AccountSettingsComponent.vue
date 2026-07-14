@@ -3,7 +3,7 @@
     <div class="header-section">
       <div class="header-content">
         <div class="section-title">账户设置</div>
-        <p class="section-description">管理当前账户资料、身份信息和 API Key。</p>
+        <p class="section-description">管理当前账户资料、身份信息。</p>
       </div>
       <a-button class="lucide-icon-btn" :loading="refreshing" @click="refreshProfile">
         <template #icon><RefreshCw :size="16" :class="{ spin: refreshing }" /></template>
@@ -103,18 +103,18 @@
         </div>
       </div>
     </div>
-
-    <div class="account-card apikey-card">
-      <ApiKeyManagementComponent />
+    <div class="account-card user-config-card">
+      <UserConfigSettingsCard />
     </div>
   </div>
 </template>
 
 <script setup>
+import UserConfigSettingsCard from '@/components/UserConfigSettingsCard.vue'
+
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { Building2, RefreshCw, ShieldCheck, Upload } from 'lucide-vue-next'
-import ApiKeyManagementComponent from '@/components/ApiKeyManagementComponent.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { useUserStore } from '@/stores/user'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'

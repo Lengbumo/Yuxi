@@ -1,7 +1,10 @@
 <template>
   <div
     class="info-card"
-    :class="{ 'info-card-disabled': disabled, 'info-card-mini': variant === 'mini' }"
+    :class="{
+      'info-card-disabled': disabled,
+      'info-card-mini': variant === 'mini'
+    }"
     @click="$emit('click')"
   >
     <template v-if="variant === 'mini'">
@@ -29,6 +32,16 @@
             </button>
           </slot>
         </div>
+        <div v-if="$slots['card-more-action-corner']" class="card-more-action-corner" @click.stop>
+          <a-dropdown :trigger="['click']" placement="bottomRight">
+            <button type="button" class="card-more-action-trigger" aria-label="更多操作">
+              <MoreHorizontal :size="18" />
+            </button>
+            <template #overlay>
+              <slot name="card-more-action-corner" />
+            </template>
+          </a-dropdown>
+        </div>
       </div>
     </template>
 
@@ -43,7 +56,7 @@
           <span class="info-card-name" :title="title">{{ title }}</span>
           <span v-if="subtitle" class="info-card-subtitle" :title="subtitle">{{ subtitle }}</span>
         </div>
-        <div class="info-card-status">
+        <div v-if="$slots.status || actionLabel || status" class="info-card-status">
           <slot name="status" />
           <template v-if="!$slots.status">
             <button
@@ -65,6 +78,16 @@
               <span class="card-status-dot" :class="`card-status-dot--${statusDotColor}`"></span>
             </template>
           </template>
+        </div>
+        <div v-if="$slots['card-more-action-corner']" class="card-more-action-corner" @click.stop>
+          <a-dropdown :trigger="['click']" placement="bottomRight">
+            <button type="button" class="card-more-action-trigger" aria-label="更多操作">
+              <MoreHorizontal :size="18" />
+            </button>
+            <template #overlay>
+              <slot name="card-more-action-corner" />
+            </template>
+          </a-dropdown>
         </div>
       </div>
 
@@ -106,7 +129,7 @@
 
 <script setup>
 import { computed } from 'vue'
-import { Plug } from 'lucide-vue-next'
+import { MoreHorizontal, Plug } from 'lucide-vue-next'
 
 const props = defineProps({
   title: { type: String, required: true },
@@ -308,6 +331,36 @@ const normalizedTags = computed(() => {
     display: flex;
     align-items: center;
     flex-shrink: 0;
+  }
+}
+
+.card-more-action-corner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  .card-more-action-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    min-width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--gray-500);
+    box-shadow: none;
+    cursor: pointer;
+  }
+
+  .card-more-action-trigger:hover,
+  .card-more-action-trigger:focus-visible {
+    border: 0;
+    background: var(--gray-100);
+    color: var(--gray-800);
   }
 }
 

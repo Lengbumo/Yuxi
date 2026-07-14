@@ -5,13 +5,15 @@ import uuid
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Any, get_origin
 
-from yuxi.agents.backends.sandbox.paths import sandbox_workspace_agents_prompt_file
+from yuxi.agents.backends.sandbox.paths import sandbox_workspace_agent_context_file
 from yuxi.utils.logging_config import logger
+from yuxi.utils.paths import WORKSPACE_AGENT_CONTEXT_FILES
 
 WORKSPACE_AGENTS_PROMPT_MAX_BYTES = 64 * 1024
 DEFAULT_SUMMARY_THRESHOLD_K = 100  # 100K tokens
 DEFAULT_SUMMARY_KEEP_MESSAGES = 10
-DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT = 500
+DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT = 300
+DEFAULT_SUMMARY_L2_TRIGGER_RATIO = 0.4
 DEFAULT_MAX_EXECUTION_STEPS = 300
 DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS = 3
 DEFAULT_YUXI_SUMMARY_PROMPT = """你是对话上下文压缩助手。
@@ -57,26 +59,29 @@ def _role_can_access(auth: str | None, role: str | None) -> bool:
     return False
 
 
-def _load_workspace_agents_prompt(thread_id: str, uid: str) -> str:
-    prompt_file = sandbox_workspace_agents_prompt_file(thread_id, uid)
-    try:
-        with prompt_file.open("rb") as buffer:
-            content = buffer.read(WORKSPACE_AGENTS_PROMPT_MAX_BYTES + 1)
-    except FileNotFoundError:
-        return ""
-    except IsADirectoryError:
-        logger.warning("读取工作区 AGENTS.md 失败: 路径是目录")
-        return ""
-    except OSError as exc:
-        logger.warning(f"读取工作区 AGENTS.md 失败: {exc}")
-        return ""
+def _load_workspace_agent_context(thread_id: str, uid: str) -> str:
+    sections: list[str] = []
+    for filename in WORKSPACE_AGENT_CONTEXT_FILES:
+        context_file = sandbox_workspace_agent_context_file(thread_id, uid, filename)
+        try:
+            with context_file.open("rb") as buffer:
+                content = buffer.read(WORKSPACE_AGENTS_PROMPT_MAX_BYTES + 1)
+        except FileNotFoundError:
+            continue
+        except IsADirectoryError:
+            logger.warning(f"读取工作区 {filename} 失败: 路径是目录")
+            continue
+        except OSError as exc:
+            logger.warning(f"读取工作区 {filename} 失败: {exc}")
+            continue
 
-    prompt = content[:WORKSPACE_AGENTS_PROMPT_MAX_BYTES].decode("utf-8", errors="replace").strip()
-    if not prompt:
-        return ""
-    if len(content) > WORKSPACE_AGENTS_PROMPT_MAX_BYTES:
-        return f"{prompt}\n\n[AGENTS.md 内容已截断]"
-    return prompt
+        prompt = content[:WORKSPACE_AGENTS_PROMPT_MAX_BYTES].decode("utf-8", errors="replace").strip()
+        if not prompt:
+            continue
+        if len(content) > WORKSPACE_AGENTS_PROMPT_MAX_BYTES:
+            prompt = f"{prompt}\n\n[{filename} 内容已截断]"
+        sections.append(f"用户工作区 agents/{filename} 内容：\n{prompt}")
+    return "\n\n".join(sections)
 
 
 async def build_agent_input_context(
@@ -88,12 +93,11 @@ async def build_agent_input_context(
     request_id: str | None = None,
 ) -> dict:
     input_context = dict(agent_config or {})
-    agents_prompt = await asyncio.to_thread(_load_workspace_agents_prompt, thread_id, uid)
+    agent_context = await asyncio.to_thread(_load_workspace_agent_context, thread_id, uid)
 
-    if agents_prompt:
-        agents_section = f"用户工作区 agents/AGENTS.md 内容：\n{agents_prompt}"
+    if agent_context:
         base_prompt = str(input_context.get("system_prompt") or "").rstrip()
-        input_context["system_prompt"] = f"{base_prompt}\n\n{agents_section}" if base_prompt else agents_section
+        input_context["system_prompt"] = f"{base_prompt}\n\n{agent_context}" if base_prompt else agent_context
 
     input_context.update({"uid": uid, "thread_id": thread_id, "run_id": run_id, "request_id": request_id})
     return input_context
@@ -260,10 +264,25 @@ class BaseContext:
     summary_tool_result_token_limit: int = field(
         default=DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT,
         metadata={
-            "name": "摘要工具结果预览上限",
+            "name": "摘要工具结果 token 上限",
             "description": (
-                "上下文摘要清洗历史工具结果时，会将完整结果写入 outputs，并用路径和不超过该 token "
-                f"数的预览替换 ToolMessage 内容，默认 {DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT}。"
+                "上下文摘要 L1 清洗历史工具结果时，超过该 token 数的 ToolMessage 会写入 outputs，"
+                "并在上下文中保留不超过该 token 数的预览；未超过则保持原样。默认 "
+                f"{DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT}。"
+            ),
+            "type": "number",
+            "auth": "admin",
+        },
+    )
+
+    summary_l2_trigger_ratio: float = field(
+        default=DEFAULT_SUMMARY_L2_TRIGGER_RATIO,
+        metadata={
+            "name": "L2 摘要触发比例",
+            "description": (
+                "L1 结构精简后，剩余上下文超过 摘要触发阈值 * 该比例 时才进入 L2 summary。"
+                "建议范围 0.1 到 1.0，值越小越容易触发 L2，默认 "
+                f"{DEFAULT_SUMMARY_L2_TRIGGER_RATIO}。"
             ),
             "type": "number",
             "auth": "admin",

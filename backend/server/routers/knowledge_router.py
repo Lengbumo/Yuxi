@@ -1386,14 +1386,14 @@ async def batch_delete_documents(
 
             await _delete_document_storage_objects(kb_id, doc_id, file_path)
 
-            # 收集待清理的文件名（循环结束后统一清理导图）
-            removed_filename = file_meta_info.get("meta", {}).get("filename", "")
-            if removed_filename:
-                mindmap_removals.append((doc_id, removed_filename))
-
             # 无论MinIO删除是否成功，都继续从知识库删除
             await knowledge_base.delete_file(kb_id, doc_id)
             deleted_count += 1
+
+            # 只有成功删除的文件才同步从导图快照移除，避免部分失败导致导图与文件表失同步
+            removed_filename = file_meta_info.get("meta", {}).get("filename", "")
+            if removed_filename:
+                mindmap_removals.append((doc_id, removed_filename))
         except Exception as e:
             logger.error(f"批量删除过程中删除文档 {doc_id} 失败: {e}, {traceback.format_exc()}")
             failed_items.append({"doc_id": doc_id, "error": str(e)})

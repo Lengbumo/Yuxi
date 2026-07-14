@@ -70,18 +70,21 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| `summary_threshold` | 上下文超过该 K token 阈值后触发摘要 |
+| `summary_threshold` | 上下文超过该 K token 阈值后触发摘要；L2 摘要模型的待摘要历史输入上限也使用同一阈值 |
 | `summary_keep_messages` | 摘要后保留最近消息数 |
 | `summary_prompt` | 摘要模型使用的提示词 |
-| `summary_tool_result_token_limit` | 被摘要历史中工具结果的预览 token 上限 |
+| `summary_tool_result_token_limit` | 工具结果 offload 阈值和预览 token 上限 |
+| `summary_l2_trigger_ratio` | L1 后进入 L2 summary 的触发比例，建议 `0.1~1.0`，默认 `0.4` |
 
 触发判断使用 Yuxi 自己的近似 token 计算结果，不使用模型返回的 `usage_metadata.total_tokens` 作为触发依据，避免 provider 的计费口径、累计口径或异常上报导致短对话过早压缩。
 
-触发后，中间件会把较早的消息压缩成一条 summary message，并保留最近窗口内的原始消息。对被摘要掉的历史工具结果，它不会把完整 `ToolMessage.content` 直接送进 summary prompt，而是先写入当前 Agent 可见的 `outputs/large_tool_results`，再用工具名、近似 token 数、完整结果路径和有限预览替换工具结果内容。
+触发后，中间件先执行 L1 结构精简：在本次模型调用的临时消息视图里截断旧 `write_file`/`edit_file` 工具调用的大参数；`ToolMessage.content` 估算 token 数超过 `summary_tool_result_token_limit` 时，会写入当前 Agent 可见的 `outputs/large_tool_results`，消息内替换为工具名、近似 token 数、完整结果路径和不超过同一 token 上限的预览。未超过该上限的工具结果保持原样。这个步骤不修改 LangGraph state 中的原始消息。
+
+L1 后会重新计算上下文大小；如果仍超过入口阈值乘以 `summary_l2_trigger_ratio`，才进入 L2 summary，把较早的 L1 视图消息压缩成一条 summary message，并保留最近窗口内的原始消息。比例越小越容易进入 L2；`1.0` 表示 L1 后仍超过原始触发阈值才进入 L2。L2 传给摘要模型的待摘要历史上限等于 `summary_threshold` 对应的 token 数，避免用过小的固定窗口丢掉早期关键信息。L2 不再对工具结果做第二轮 offload，只写入 `_summarization_event`，后续调用仍由 DeepAgents 的 cutoff 语义重建 effective messages。
 
 这对知识库检索尤其重要：`query_kb`、`open_kb_document`、`find_kb_document` 等工具可能返回较长的片段、引用和文档内容。Summary 阶段保留“查过什么、结果在哪里、关键预览是什么”，同时避免把大量检索原文反复卷入摘要，减少上下文污染和 token 压力。
 
-未触发 summary 的常规模型调用不会额外清洗最近窗口内的工具结果；常规工具结果预算主要由文件系统中间件在工具返回阶段处理。
+未达到入口阈值的常规模型调用不会额外清洗工具结果；达到入口阈值但 L1 后低于 L2 门槛时，会直接用 L1 精简后的临时视图调用模型，不生成 summary event。
 
 ## 自定义中间件
 

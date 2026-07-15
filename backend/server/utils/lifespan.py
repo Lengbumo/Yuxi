@@ -65,6 +65,9 @@ async def lifespan(app: FastAPI):
     try:
         from yuxi.models.providers.cache import model_cache
         from yuxi.models.providers.service import get_all_model_providers
+        # 应用 langchain reasoning patch（提取 doubao 等模型的 thinking 内容）
+        from yuxi.agents.patches.langchain_reasoning import apply as apply_reasoning_patch
+        apply_reasoning_patch()
 
         async with pg_manager.get_async_session_context() as session:
             providers = await get_all_model_providers(session)

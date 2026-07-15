@@ -182,7 +182,7 @@ const props = defineProps({
   // 是否显示推理过程
   showRefs: {
     type: [Array, Boolean],
-    default: () => false
+    default: () => true
   },
   // 是否为最新消息
   isLatestMessage: {

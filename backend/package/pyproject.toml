@@ -29,6 +29,7 @@ dependencies = [
     "langchain-community>=0.4",
     "langchain-core>=1.2.5",
     "langchain-deepseek>=1.0",
+    "langchain-ollama>=1.0",
     "langchain-mcp-adapters>=0.1.9",
     "langchain-openai>=1.0.2",
     "langchain-tavily>=0.2.13",

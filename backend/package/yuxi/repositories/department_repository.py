@@ -3,6 +3,7 @@
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Department
@@ -20,8 +21,12 @@ class DepartmentRepository:
     async def get_by_name(self, name: str) -> Department | None:
         """根据名称获取部门"""
         async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(Department).where(Department.name == name))
-            return result.scalar_one_or_none()
+            return await self.get_by_name_with_db(session, name)
+
+    async def get_by_name_with_db(self, db: AsyncSession, name: str) -> Department | None:
+        """根据名称获取部门(使用外部 session)。"""
+        result = await db.execute(select(Department).where(Department.name == name))
+        return result.scalar_one_or_none()
 
     async def list_departments(self) -> list[Department]:
         """获取所有部门列表"""
@@ -54,6 +59,14 @@ class DepartmentRepository:
         async with pg_manager.get_async_session_context() as session:
             department = Department(**data)
             session.add(department)
+        return department
+
+    async def create_with_db(self, db: AsyncSession, data: dict[str, Any]) -> Department:
+        """创建部门(使用外部 session,保证跨表事务原子性)。"""
+        department = Department(**data)
+        db.add(department)
+        await db.flush()
+        await db.refresh(department)
         return department
 
     async def update(self, id: int, data: dict[str, Any]) -> Department | None:

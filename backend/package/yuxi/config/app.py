@@ -17,17 +17,16 @@ READONLY_CONFIG_FIELDS = frozenset({"save_dir"})
 DEFAULT_OCR_ENGINE = "rapid_ocr"
 
 
-def _get_available_ocr_engines() -> set[str]:
-    from yuxi.knowledge.parser.factory import DocumentProcessorFactory
-
-    return {"disable", *DocumentProcessorFactory.get_available_processors()}
-
-
 def _normalize_default_ocr_engine(value: Any) -> str:
-    engine = str(value or "").strip() or DEFAULT_OCR_ENGINE
-    if engine not in _get_available_ocr_engines():
-        raise ValueError(f"不支持的默认 OCR 引擎: {engine}")
-    return engine
+    """规范化默认 OCR 引擎名，仅做基本非空处理。
+
+    不在此处校验引擎可用性：可用引擎列表来自 yuxi.knowledge.parser.factory，
+    而本模块在顶层执行 ``config = Config()`` 实例化。若在构造期导入 factory，会
+    反向触发 yuxi.knowledge 初始化，与尚未完成初始化的 yuxi.config 形成循环导入。
+    引擎合法性改由 DocumentProcessorFactory.get_processor 在实际创建处理器时校验
+    （对未知引擎抛 ValueError 并列出全部支持类型），故启动期无需重复校验。
+    """
+    return str(value or "").strip() or DEFAULT_OCR_ENGINE
 
 
 class Config(BaseModel):

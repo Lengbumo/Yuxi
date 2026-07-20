@@ -11,5 +11,6 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from yuxi.services.run_worker import WorkerSettings
-
+# $env:PYTHONPATH="backend"
+# python -m arq server.worker_main.WorkerSettings
 __all__ = ["WorkerSettings"]

@@ -124,7 +124,7 @@ class MinerUParser(BaseDocumentProcessor):
 
         data = {
             "lang_list": params.get("lang_list", ["ch"]),
-            "backend": params.get("backend", "hybrid-auto-engine"),
+            "backend": params.get("backend", "vlm-http-client"),
             "parse_method": params.get("parse_method", "auto"),
             "formula_enable": params.get("formula_enable", True),
             "table_enable": params.get("table_enable", True),
@@ -136,9 +136,11 @@ class MinerUParser(BaseDocumentProcessor):
             "return_images": True,
         }
 
-        server_url = params.get("server_url")
-        if server_url:
-            data["server_url"] = server_url
+        if data["backend"] == "vlm-http-client":
+            mineru_vl_server = os.environ.get("MINERU_VL_SERVER")
+            server_url = params.get("server_url") or mineru_vl_server
+            if server_url:
+                data["server_url"] = server_url
 
         try:
             start_time = time.time()
@@ -184,23 +186,30 @@ class MinerUParser(BaseDocumentProcessor):
                 # 直接从响应内容获取 ZIP 数据
                 zip_data = response.content
 
-                # 保存到临时文件并处理
-                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp_zip:
-                    tmp_zip.write(zip_data)
-                    tmp_zip.flush()
+                # 保存到临时文件（写完后关闭句柄，再交给 process_zip_file_sync 处理。
+                # Windows 不允许在文件句柄未关闭时再次打开同一文件，否则 [WinError 32]）
+                tmp_zip_path: str | None = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp_zip:
+                        tmp_zip.write(zip_data)
+                        tmp_zip.flush()
+                        tmp_zip_path = tmp_zip.name
 
-                    try:
-                        image_bucket = params.get("image_bucket") or "public"
-                        image_prefix = params.get("image_prefix") or "unknown/kb-images"
+                    image_bucket = params.get("image_bucket") or "public"
+                    image_prefix = params.get("image_prefix") or "unknown/kb-images"
 
-                        processed = process_zip_file_sync(
-                            tmp_zip.name,
-                            image_bucket=image_bucket,
-                            image_prefix=image_prefix,
-                        )
-                        text = processed["markdown_content"]
-                    finally:
-                        os.unlink(tmp_zip.name)
+                    processed = process_zip_file_sync(
+                        tmp_zip_path,
+                        image_bucket=image_bucket,
+                        image_prefix=image_prefix,
+                    )
+                    text = processed["markdown_content"]
+                finally:
+                    if tmp_zip_path:
+                        try:
+                            os.unlink(tmp_zip_path)
+                        except OSError:
+                            pass
 
                 if not text:
                     logger.error("MinerU 未返回任何文本内容")

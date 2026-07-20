@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 SANDBOX_ENV_FILE = Path(__file__).parent / "sandbox.env"
 SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-
+# uvicorn app:app --host 0.0.0.0 --port 8002
 def canonical_backend_name(backend: str) -> str:
     value = (backend or "").strip().lower()
     return value or "memory"
@@ -178,10 +178,18 @@ class LocalContainerProvisionerBackend:
         if not value:
             raise RuntimeError("docker host bind path is required")
 
+        normalized = value.replace("\\", "/")
+
+        # 仅在 Docker 容器内运行时需要把 Windows 路径转成 Linux VM 路径
+        # 本地运行时 Docker Desktop 能直接处理 Windows 路径，无需转换
+        import sys
+
+        if sys.platform == "win32":
+            return normalized
+
         # Docker Desktop on Windows can report bind sources as D:\\... while
         # this provisioner runs in a Linux container. Convert that daemon-
         # reported path into the Linux path exposed inside Docker Desktop.
-        normalized = value.replace("\\", "/")
         match = re.match(r"^([A-Za-z]):/(.+)$", normalized)
         if match:
             drive = match.group(1).lower()
@@ -431,7 +439,16 @@ class LocalContainerProvisionerBackend:
                 run_kwargs["environment"] = sandbox_env
 
             container = self._client.containers.run(self._sandbox_image, **run_kwargs)
-            container.reload()
+
+            # Docker Desktop on Windows 可能延迟分配端口映射，创建后轮询等待
+            host_port = None
+            for _ in range(10):
+                container.reload()
+                host_port = self._host_port_for(container)
+                if host_port is not None:
+                    break
+                time.sleep(0.5)
+
             self._ensure_user_data_writable(container)
             record = self._to_record(container, sandbox_id)
             if not record.sandbox_url:
@@ -944,7 +961,37 @@ class SandboxIdleReaper:
             self._thread.join(timeout=3)
 
 
+def _load_env_file() -> None:
+    """从项目根目录的 .env 文件加载环境变量（不覆盖已有值）。
+
+    本地开发时 provisioner 作为独立进程启动，不会自动加载 .env。
+    docker-compose 环境下通过 environment 段注入，此函数为空操作。
+    """
+    from pathlib import Path
+
+    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        with open(env_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                # 不覆盖已有的环境变量（系统/命令行优先）
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception as exc:
+        logger.warning("Failed to load .env file from %s: %s", env_path, exc)
+
+
 def _build_backend():
+    _load_env_file()
     backend = canonical_backend_name(os.getenv("PROVISIONER_BACKEND", "memory"))
     if backend == "docker":
         return LocalContainerProvisionerBackend(), backend

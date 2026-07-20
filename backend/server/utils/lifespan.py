@@ -66,6 +66,11 @@ async def lifespan(app: FastAPI):
         from yuxi.models.providers.cache import model_cache
         from yuxi.models.providers.service import get_all_model_providers
 
+        # 应用 langchain reasoning patch（提取 doubao 等模型的 thinking 内容）
+        from yuxi.agents.patches.langchain_reasoning import apply as apply_reasoning_patch
+
+        apply_reasoning_patch()
+
         async with pg_manager.get_async_session_context() as session:
             providers = await get_all_model_providers(session)
             model_cache.rebuild(providers)
@@ -91,6 +96,17 @@ async def lifespan(app: FastAPI):
     # 启动运行时配置同步线程（周期性从 Redis 拉取管理员保存的配置快照）
     config.start_runtime_sync()
 
+    # 确保 IM 默认部门存在,IM 渠道自动创建用户统一归属该部门
+    try:
+        from yuxi.im_channels.user_service import ensure_im_default_department
+
+        async with pg_manager.get_async_session_context() as session:
+            dept_id = await ensure_im_default_department(session)
+            await session.commit()
+        logger.info("[IM] default department ready (id=%s)", dept_id)
+    except Exception as e:
+        logger.error(f"Failed to ensure IM default department during startup: {e}")
+
     try:
         init_sandbox_provider()
     except Exception as e:
@@ -106,13 +122,13 @@ async def lifespan(app: FastAPI):
     await tasker.start()
     logger.info(f"""
 
-░██     ░██                       ░██
- ░██   ░██
-  ░██ ░██   ░██    ░██ ░██    ░██ ░██
-   ░████    ░██    ░██  ░██  ░██  ░██
-    ░██     ░██    ░██   ░█████   ░██
-    ░██     ░██   ░███  ░██  ░██  ░██
-    ░██      ░█████░██ ░██    ░██ ░██  v{get_version()}
+░██     ░██            ░██   ░███    ░██
+░██     ░██                 ░██░██      
+░██     ░██ ░██    ░██ ░██ ░██  ░██  ░██
+░██████████ ░██    ░██ ░██░█████████ ░██
+░██     ░██ ░██    ░██ ░██░██    ░██ ░██
+░██     ░██ ░██   ░███ ░██░██    ░██ ░██
+░██     ░██  ░█████░██ ░██░██    ░██ ░██  v{get_version()}
 
     """)
     logger.info("Yuxi backend startup complete")

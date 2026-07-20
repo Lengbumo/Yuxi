@@ -266,7 +266,6 @@ def _message_chunk_yuxi_events(
         message_event["additional_reasoning_content"] = additional_reasoning_content
     if len(message_event) > 4:
         events.append(message_event)
-
     tool_call_chunks = msg_dict.get("tool_call_chunks")
     if isinstance(tool_call_chunks, list):
         for tool_call_chunk in tool_call_chunks:
@@ -307,9 +306,17 @@ def _protocol_event_yuxi_event(
     route = {"thread_id": thread_id, "namespace": namespace}
     if event_name == "content-block-delta":
         delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
-        text = delta.get("text")
-        if delta.get("type") == "text-delta" and isinstance(text, str) and text:
-            return {"type": "message_delta", "message_id": message_id, "content": text, **route}
+        delta_type = delta.get("type")
+        if delta_type == "text-delta":
+            text = delta.get("text")
+            if isinstance(text, str) and text:
+                return {"type": "message_delta", "message_id": message_id, "content": text, **route}
+            return None
+        if delta_type == "reasoning-delta":
+            reasoning = delta.get("reasoning")
+            if isinstance(reasoning, str) and reasoning:
+                return {"type": "message_delta", "message_id": message_id, "additional_reasoning_content": reasoning, **route}
+            return None
         return None
 
     if event_name == "content-block-finish":
@@ -367,6 +374,7 @@ def _message_payload_yuxi_events(
         msg_dict = dict(msg)
     else:
         msg_dict = {"content": str(msg)}
+        logger.info(f"[yuxi_payload] PATH=fallback, msg_type={type(msg).__name__}")
 
     message_id = str(msg_dict.get("id") or _stream_message_id(protocol_message_ids, message_key))
     return _message_chunk_yuxi_events(

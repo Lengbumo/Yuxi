@@ -62,6 +62,21 @@ def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel
             **kwargs,
         )
 
+    if info.provider_id == "ollama":
+        from langchain_ollama import ChatOllama
+
+        logger.debug(f"Loading model provider_id={info.provider_id}")
+        return ChatOllama(
+            model=info.model_id,
+            base_url=info.base_url,
+            **kwargs,
+        )
+
+    thinking = True
+    kwargs.setdefault("extra_body", {}).update({
+        "reasoning": {"effort": "medium" if thinking else "minimal"},
+        "thinking": {"type": "enabled" if thinking else "disabled"}
+    })
     return _ToolCallChunkFixChatOpenAI(
         model=info.model_id,
         api_key=SecretStr(api_key),
@@ -69,7 +84,6 @@ def load_chat_model(fully_specified_name: str | None, **kwargs) -> BaseChatModel
         stream_usage=True,
         **kwargs,
     )
-
 
 class _ToolCallChunkFixChatOpenAI(ChatOpenAI):
     """归一化流式 tool_call 续片中的空串 name/id，规避 v3 流式累积缺陷。"""

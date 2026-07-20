@@ -35,6 +35,7 @@ cache
 .backup
 *.bak
 *._*
+.opencli
 
 # test
 .pytest_cache

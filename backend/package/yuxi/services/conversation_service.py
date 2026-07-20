@@ -25,7 +25,7 @@ from yuxi.utils.upload_utils import read_upload_with_limit, write_upload_to_path
 
 ATTACHMENT_ALLOWED_EXTENSIONS: tuple[str, ...] = ()
 MAX_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
-MAX_ATTACHMENT_MARKDOWN_CHARS = 32_000  # TODO: 转 MARKDOWN的时候，不应该裁剪
+MAX_ATTACHMENT_MARKDOWN_CHARS = 32_000  # 对话消息中注入的 markdown 预览字符上限（不影响文件存储）
 TMP_ATTACHMENT_PREFIX = "tmp/chat_attachments"
 TMP_ATTACHMENT_PARSE_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif")
 TMP_ATTACHMENT_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif")
@@ -87,7 +87,7 @@ async def _convert_upload_to_markdown(upload: UploadFile) -> ConversionResult:
     try:
         file_size = await _write_upload_to_disk(upload, temp_path)
         markdown = await Parser.aparse(str(temp_path))
-        markdown, truncated = _truncate_markdown(markdown)
+        truncated = len(markdown) > MAX_ATTACHMENT_MARKDOWN_CHARS
         return ConversionResult(
             file_id=uuid.uuid4().hex,
             file_name=file_name,
@@ -329,6 +329,9 @@ async def _materialize_attachment_files(
     )
     markdown_host_path.write_text(conversion.markdown, encoding="utf-8")
 
+    # 对话消息中仅注入截断预览，文件存储全文供 agent read 工具读取
+    preview_markdown, _ = _truncate_markdown(conversion.markdown)
+
     record.update(
         {
             "status": "parsed",
@@ -336,7 +339,7 @@ async def _materialize_attachment_files(
             "artifact_url": _artifact_url(thread_id, markdown_virtual_path),
             "storage_path": str(markdown_host_path),
             "file_path": markdown_virtual_path,
-            "markdown": conversion.markdown,
+            "markdown": preview_markdown,
             "truncated": conversion.truncated,
             "markdown_storage_path": str(markdown_host_path),
         }
@@ -383,6 +386,10 @@ def _materialize_tmp_attachment_files(
         file_name=storage_name,
     )
     markdown_host_path.write_text(parsed_markdown, encoding="utf-8")
+
+    # 对话消息中仅注入截断预览，文件存储全文供 agent read 工具读取
+    preview_markdown, _ = _truncate_markdown(parsed_markdown)
+
     record.update(
         {
             "status": "parsed",
@@ -390,7 +397,7 @@ def _materialize_tmp_attachment_files(
             "artifact_url": _artifact_url(thread_id, markdown_virtual_path),
             "storage_path": str(markdown_host_path),
             "file_path": markdown_virtual_path,
-            "markdown": parsed_markdown,
+            "markdown": preview_markdown,
             "truncated": truncated,
             "markdown_storage_path": str(markdown_host_path),
         }
@@ -637,7 +644,7 @@ async def parse_tmp_attachment_view(
 
     try:
         markdown = await Parser.aparse(_minio_source(bucket_name, object_name), params={"ocr_engine": method})
-        markdown, truncated = _truncate_markdown(markdown)
+        truncated = len(markdown) > MAX_ATTACHMENT_MARKDOWN_CHARS
         parsed_object_name = _make_tmp_parsed_object(str(current_uid), tmp_file_id, safe_name)
         upload_result = await minio_client.aupload_file(
             bucket_name=bucket_name,

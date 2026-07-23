@@ -48,6 +48,10 @@
             v-model:value="modelSearchKeyword"
             placeholder="搜索模型"
             allow-clear
+            autocomplete="off"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
             @keydown.stop
           >
             <template #suffix>
@@ -83,11 +87,31 @@
                 :key="model.spec"
                 @click="handleSelectV2Model(model.spec)"
               >
-                {{ model.display_name }}
+                <div class="model-option">
+                  <span class="model-option-name">{{ model.display_name }}</span>
+                  <div class="model-option-signals">
+                    <a-tooltip v-if="getModelInfo(model).vision" title="支持图像输入">
+                      <span class="model-signal-icon" role="img" aria-label="支持图像输入">
+                        <Eye :size="13" />
+                      </span>
+                    </a-tooltip>
+                    <a-tooltip
+                      v-if="getModelInfo(model).isOneMillionContext"
+                      title="约 1M tokens 上下文窗口"
+                    >
+                      <span class="model-context-badge">1M</span>
+                    </a-tooltip>
+                  </div>
+                </div>
               </a-menu-item>
             </a-menu-item-group>
           </template>
         </a-menu>
+        <div v-if="hasModelMetadata" class="model-metadata-source">
+          部分信息（价格、能力等）来自
+          <a href="https://models.dev" target="_blank" rel="noreferrer" @click.stop>models.dev</a>
+          填补。仅供参考，可能和官网有偏差。
+        </div>
       </div>
     </template>
   </a-dropdown>
@@ -96,8 +120,9 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { modelProviderApi } from '@/apis/system_api'
-import { RefreshCw, X } from 'lucide-vue-next'
+import { Eye, RefreshCw, X } from 'lucide-vue-next'
 import { useModelStatus } from '@/composables/useModelStatus'
+import { loadModelMetadataCatalog, resolveModelDisplayMetadata } from '@/utils/modelMetadata'
 
 const props = defineProps({
   model_spec: {
@@ -135,6 +160,7 @@ const v2Models = ref({})
 const loadingV2Models = ref(false)
 const dropdownOpen = ref(false)
 const modelSearchKeyword = ref('')
+const modelMetadataBySpec = ref({})
 let fetchV2ModelsPromise = null
 
 const filteredV2Models = computed(() => {
@@ -168,6 +194,8 @@ const hasFilteredModels = computed(() => {
   return Object.values(filteredV2Models.value).some((providerData) => providerData.models?.length)
 })
 
+const hasModelMetadata = computed(() => Object.keys(modelMetadataBySpec.value).length > 0)
+
 const getProviderDisplayName = (providerId, providerData = {}) => {
   return (
     providerData.provider_display_name ||
@@ -184,9 +212,17 @@ const fetchV2Models = async () => {
   loadingV2Models.value = true
   fetchV2ModelsPromise = (async () => {
     try {
+      const catalogRequest = loadModelMetadataCatalog().catch((error) => {
+        console.warn('Failed to load model metadata catalog:', error)
+        return null
+      })
       const response = await modelProviderApi.getV2Models('chat')
       if (response.success) {
         v2Models.value = response.data || {}
+        const catalog = await catalogRequest
+        modelMetadataBySpec.value = catalog
+          ? buildModelMetadataBySpec(v2Models.value, catalog.providers)
+          : {}
       }
     } catch (error) {
       console.warn('Failed to load v2 models:', error)
@@ -198,6 +234,18 @@ const fetchV2Models = async () => {
 
   return fetchV2ModelsPromise
 }
+
+const buildModelMetadataBySpec = (modelsByProvider, providers) => {
+  return Object.entries(modelsByProvider).reduce((result, [providerId, providerData]) => {
+    for (const model of providerData.models || []) {
+      const info = resolveModelDisplayMetadata(providers, providerId, model)
+      if (info.matched) result[model.spec] = info
+    }
+    return result
+  }, {})
+}
+
+const getModelInfo = (model) => modelMetadataBySpec.value[model.spec] || {}
 
 // 下拉展开前先刷新模型列表，避免弹层打开后再因数据加载发生高度跳变。
 const handleOpenChange = async (open) => {
@@ -416,8 +464,8 @@ const handleClear = () => {
 }
 
 .model-dropdown {
-  min-width: 280px;
-  max-width: 420px;
+  min-width: 320px;
+  max-width: min(440px, calc(100vw - 24px));
   overflow: hidden;
   background: var(--gray-0);
   border-radius: 8px;
@@ -453,6 +501,66 @@ const handleClear = () => {
   .ant-dropdown-menu-item-selected.ant-dropdown-menu-item-active {
     color: var(--gray-1000);
     background: var(--main-50);
+  }
+
+  .ant-dropdown-menu-item {
+    padding-top: 7px;
+    padding-bottom: 7px;
+  }
+}
+
+.model-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.model-option-name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gray-1000);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-option-signals {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  color: var(--gray-500);
+}
+
+.model-context-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 4px;
+  color: var(--gray-600);
+  background: var(--gray-100);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.model-signal-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
+.model-metadata-source {
+  padding: 7px 10px;
+  border-top: 1px solid var(--gray-100);
+  color: var(--gray-500);
+  background: var(--gray-25);
+  font-size: 11px;
+  line-height: 16px;
+
+  a {
+    color: var(--main-600);
   }
 }
 </style>

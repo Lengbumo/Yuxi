@@ -75,7 +75,11 @@
                 :class="`card-status-tag--${status.level || 'info'}`"
                 >{{ status.label }}</span
               >
-              <span class="card-status-dot" :class="`card-status-dot--${statusDotColor}`"></span>
+              <span
+                v-if="status.showDot !== false"
+                class="card-status-dot"
+                :class="`card-status-dot--${statusDotColor}`"
+              ></span>
             </template>
           </template>
         </div>

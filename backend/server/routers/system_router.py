@@ -37,6 +37,11 @@ async def discovery():
                 "api_key_auth": True,
                 "remote_config": True,
                 "kb_upload": True,
+                "kb_list": True,
+                "kb_files": True,
+                "kb_query": True,
+                "kb_open": True,
+                "kb_find": True,
             }
         },
         "endpoints": {

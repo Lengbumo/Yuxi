@@ -7,12 +7,17 @@ import json
 import time
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.agents.skills.service import init_builtin_skills
 from yuxi.config import config as sys_config
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
+from yuxi.services.agent_request_queue_service import (
+    RUN_STATUS_TO_DELIVERY_STATUS,
+    dispatch_next_request,
+    recover_pending_dispatches,
+)
 from yuxi.services.chat_service import stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.services.run_queue_service import (
@@ -39,6 +44,12 @@ class RetryableRunError(Exception):
 
 class NonRetryableRunError(Exception):
     """Error type that should not trigger ARQ retry."""
+
+
+@dataclass(frozen=True)
+class TerminalTransition:
+    status: str | None
+    changed: bool
 
 
 @dataclass
@@ -147,7 +158,19 @@ async def mark_run_running(run_id: str):
 async def mark_run_terminal(run_id: str, status: str, error_type: str | None = None, error_message: str | None = None):
     async with pg_manager.get_async_session_context() as db:
         repo = AgentRunRepository(db)
-        await repo.set_terminal_status(run_id, status=status, error_type=error_type, error_message=error_message)
+        run, changed = await repo.set_terminal_status(
+            run_id,
+            status=status,
+            error_type=error_type,
+            error_message=error_message,
+        )
+        persisted_status = run.status if run else None
+        delivery_status = RUN_STATUS_TO_DELIVERY_STATUS.get(persisted_status or "")
+        if changed and run and run.input_message_id and delivery_status:
+            await db.execute(
+                update(Message).where(Message.id == run.input_message_id).values(delivery_status=delivery_status)
+            )
+        return TerminalTransition(status=persisted_status, changed=changed)
 
 
 async def _load_user(uid: str):
@@ -242,6 +265,26 @@ async def _append_end_event(run_id: str, status: str, *, thread_id: str | None, 
     await append_run_event(run_id, "end", end_payload, thread_id=thread_id)
 
 
+async def _finish_run(
+    run_id: str,
+    status: str,
+    *,
+    thread_id: str | None,
+    chunk: dict,
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> TerminalTransition:
+    transition = await mark_run_terminal(
+        run_id,
+        status,
+        error_type=error_type,
+        error_message=error_message,
+    )
+    if transition.changed and transition.status:
+        await _append_end_event(run_id, transition.status, thread_id=thread_id, payload={"chunk": chunk})
+    return transition
+
+
 async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
     while True:
         next_task = asyncio.create_task(agen.__anext__())
@@ -269,6 +312,12 @@ async def process_agent_run(ctx, run_id: str):
         return
 
     if run.status in TERMINAL_RUN_STATUSES:
+        if run.status == "completed":
+            await dispatch_next_request(
+                uid=run.uid,
+                agent_slug=run.agent_slug,
+                thread_id=run.conversation_thread_id,
+            )
         logger.info(f"Run already terminal, skip: {run_id}, status={run.status}")
         return
 
@@ -332,6 +381,7 @@ async def process_agent_run(ctx, run_id: str):
         "has_image": bool(image_content),
         "attachment_file_ids": input_metadata.get("attachment_file_ids") or [],
         "model_spec": payload.get("model_spec"),
+        "tool_approval_mode": payload.get("tool_approval_mode"),
         "run_type": run_type,
         "created_by_run_id": run.created_by_run_id,
     }
@@ -411,34 +461,41 @@ async def process_agent_run(ctx, run_id: str):
                     if event_type != "end":
                         await append_run_event(run_id, event_type, event_payload, thread_id=target_thread_id)
 
+                    if await run_ctx.is_cancelled():
+                        raise asyncio.CancelledError(f"run {run_id} cancelled")
+
                     if target_thread_id != thread_id:
-                        if await run_ctx.is_cancelled():
-                            raise asyncio.CancelledError(f"run {run_id} cancelled")
                         continue
 
                     if status == "finished":
-                        await mark_run_terminal(run_id, "completed")
-                        await _append_end_event(run_id, "completed", thread_id=thread_id, payload={"chunk": chunk})
-                        terminal_set = True
+                        transition = await _finish_run(
+                            run_id,
+                            "completed",
+                            thread_id=thread_id,
+                            chunk=chunk,
+                        )
+                        terminal_set = transition.status is not None
                     elif status == "error":
-                        await mark_run_terminal(
+                        transition = await _finish_run(
                             run_id,
                             "failed",
+                            thread_id=thread_id,
+                            chunk=chunk,
                             error_type=chunk.get("error_type") or "stream_error",
                             error_message=chunk.get("error_message") or chunk.get("message"),
                         )
-                        await _append_end_event(run_id, "failed", thread_id=thread_id, payload={"chunk": chunk})
-                        terminal_set = True
+                        terminal_set = transition.status is not None
                     elif status == "interrupted":
                         status_value = "cancelled" if await _is_cancel_requested(run_id) else "interrupted"
-                        await mark_run_terminal(
+                        transition = await _finish_run(
                             run_id,
                             status_value,
+                            thread_id=thread_id,
+                            chunk=chunk,
                             error_type=status_value,
                             error_message=chunk.get("message"),
                         )
-                        await _append_end_event(run_id, status_value, thread_id=thread_id, payload={"chunk": chunk})
-                        terminal_set = True
+                        terminal_set = transition.status is not None
                     elif status in {"ask_user_question_required", "human_approval_required"}:
                         questions = chunk.get("questions") if isinstance(chunk, dict) else None
                         first_question = ""
@@ -447,36 +504,52 @@ async def process_agent_run(ctx, run_id: str):
                             if isinstance(first, dict):
                                 first_question = str(first.get("question") or "").strip()
 
-                        await mark_run_terminal(
+                        transition = await _finish_run(
                             run_id,
                             "interrupted",
+                            thread_id=thread_id,
+                            chunk=chunk,
                             error_type=status,
-                            error_message=first_question or "需要用户回答问题",
+                            error_message=(
+                                "需要用户审批工具操作"
+                                if status == "human_approval_required"
+                                else first_question or "需要用户回答问题"
+                            ),
                         )
-                        await _append_end_event(run_id, "interrupted", thread_id=thread_id, payload={"chunk": chunk})
-                        terminal_set = True
-
-                    if await run_ctx.is_cancelled():
-                        raise asyncio.CancelledError(f"run {run_id} cancelled")
+                        terminal_set = transition.status is not None
 
         await writer.flush()
         if not terminal_set:
+            if await run_ctx.is_cancelled():
+                raise asyncio.CancelledError(f"run {run_id} cancelled")
             finished_chunk = {"status": "finished", "request_id": request_id}
-            await mark_run_terminal(run_id, "completed")
-            await _append_end_event(run_id, "completed", thread_id=thread_id, payload={"chunk": finished_chunk})
+            await _finish_run(
+                run_id,
+                "completed",
+                thread_id=thread_id,
+                chunk=finished_chunk,
+            )
 
     except asyncio.CancelledError:
         await writer.flush()
         cancel_chunk = {"status": "interrupted", "message": "对话已取消", "request_id": request_id}
-        await append_run_event(
+        transition = await mark_run_terminal(
             run_id,
-            "interrupt",
-            {"reason": "cancelled", "chunk": cancel_chunk},
-            thread_id=thread_id,
+            "cancelled",
+            error_type="cancelled",
+            error_message="对话已取消",
         )
-        await mark_run_terminal(run_id, "cancelled", error_type="cancelled", error_message="对话已取消")
-        await _append_end_event(run_id, "cancelled", thread_id=thread_id, payload={"chunk": cancel_chunk})
-        logger.info(f"Run cancelled: {run_id}")
+        if transition.changed:
+            await append_run_event(
+                run_id,
+                "interrupt",
+                {"reason": "cancelled", "chunk": cancel_chunk},
+                thread_id=thread_id,
+            )
+            await _append_end_event(run_id, "cancelled", thread_id=thread_id, payload={"chunk": cancel_chunk})
+            logger.info(f"Run cancelled: {run_id}")
+        else:
+            logger.info(f"Run cancellation ignored after terminal status: {run_id}, status={transition.status}")
     except Exception as e:
         await writer.flush()
         if _is_retryable_exception(e):
@@ -497,17 +570,13 @@ async def process_agent_run(ctx, run_id: str):
                 thread_id=thread_id,
             )
             if _is_last_try(ctx):
-                await mark_run_terminal(
-                    run_id,
-                    "failed",
-                    error_type="retryable_worker_error",
-                    error_message=str(e),
-                )
-                await _append_end_event(
+                await _finish_run(
                     run_id,
                     "failed",
                     thread_id=thread_id,
-                    payload={"chunk": retryable_error_chunk},
+                    chunk=retryable_error_chunk,
+                    error_type="retryable_worker_error",
+                    error_message=str(e),
                 )
                 logger.error(f"Run failed after retries exhausted {run_id}: {e}")
                 return
@@ -530,12 +599,26 @@ async def process_agent_run(ctx, run_id: str):
             {"chunk": error_chunk, "retryable": False},
             thread_id=thread_id,
         )
-        await mark_run_terminal(run_id, "failed", error_type="worker_error", error_message=str(e))
-        await _append_end_event(run_id, "failed", thread_id=thread_id, payload={"chunk": error_chunk})
+        await _finish_run(
+            run_id,
+            "failed",
+            thread_id=thread_id,
+            chunk=error_chunk,
+            error_type="worker_error",
+            error_message=str(e),
+        )
         return
     finally:
         await run_ctx.close()
         await clear_cancel_signal(run_id)
+        # completed 后尝试派发线程的下一个排队请求
+        final_run = await _get_run(run_id)
+        if final_run and final_run.status == "completed":
+            await dispatch_next_request(
+                uid=uid,
+                agent_slug=agent_slug,
+                thread_id=thread_id,
+            )
 
 
 async def _load_input_message(message_id: int | None) -> Message | None:
@@ -556,6 +639,7 @@ async def _worker_startup(ctx):
     async with pg_manager.get_async_session_context() as session:
         await init_builtin_skills(session)
     sys_config.start_runtime_sync()
+    await recover_pending_dispatches()
     # 应用 langchain reasoning patch（提取 doubao 等模型的 thinking 内容）
     from yuxi.agents.patches.langchain_reasoning import apply as apply_reasoning_patch
     apply_reasoning_patch()

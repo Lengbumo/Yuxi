@@ -31,6 +31,7 @@ from yuxi.services.auth_service import (
     get_cli_auth_session_for_user,
 )
 from yuxi.storage.minio import upload_image_to_minio
+from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.utils.datetime_utils import utc_now_naive
 
 # OIDC 认证相关导入
@@ -61,7 +62,7 @@ class Token(BaseModel):
 
 class UserCreate(BaseModel):
     username: str
-    password: str
+    password: str = Field(min_length=8)
     role: str = "user"
     phone_number: str | None = None
     department_id: int | None = None
@@ -69,7 +70,7 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     username: str | None = None
-    password: str | None = None
+    password: str | None = Field(default=None, min_length=8)
     role: str | None = None
     phone_number: str | None = None
     avatar: str | None = None
@@ -104,7 +105,7 @@ class UserAccessOption(BaseModel):
 
 class InitializeAdmin(BaseModel):
     uid: str  # 直接输入用户ID
-    password: str
+    password: str = Field(min_length=8)
     phone_number: str | None = None
 
 
@@ -284,7 +285,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         "username": user.username,
         "uid": user.uid,
         "phone_number": user.phone_number,
-        "avatar": user.avatar,
+        "avatar": normalize_public_minio_url(user.avatar),
         "role": user.role,
         "department_id": user.department_id,
         "department_name": department_name,
@@ -995,7 +996,7 @@ async def impersonate_user(
         "username": target_user.username,
         "uid": target_user.uid,
         "phone_number": target_user.phone_number,
-        "avatar": target_user.avatar,
+        "avatar": normalize_public_minio_url(target_user.avatar),
         "role": target_user.role,
         "department_id": target_user.department_id,
         "department_name": department_name,

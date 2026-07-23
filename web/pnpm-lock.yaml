@@ -24,6 +24,9 @@ importers:
       '@antv/g6':
         specifier: ^5.1.1
         version: 5.1.1
+      '@opencode-ai/models':
+        specifier: 0.0.15
+        version: 0.0.15
       '@sigma/edge-curve':
         specifier: ^3.1.0
         version: 3.1.0(sigma@3.0.3(graphology-types@0.24.8))
@@ -498,6 +501,15 @@ packages:
     peerDependencies:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
+
+  '@opencode-ai/models@0.0.15':
+    resolution: {integrity: sha512-PBJwmfnIQQaKoZScHyBN23z9qo3Az0uYL+Jmwffa0x1aCwp5NKiYGrjYJ5ynaNg4xfLe5aY2quEJeDKWgbR2VA==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      effect: 4.0.0-beta.83
+    peerDependenciesMeta:
+      effect:
+        optional: true
 
   '@oxc-project/types@0.138.0':
     resolution: {integrity: sha512-1a7ZKmrRTCoN1XMZ4L0PyyqrMnrNlLyPuOkdSX2MZg7IiIGRUyurNhAm73ptDOraoBcIordsIGKNPKUzy3ZmfA==}
@@ -2558,6 +2570,8 @@ snapshots:
       '@emnapi/runtime': 1.11.1
       '@tybys/wasm-util': 0.10.3
     optional: true
+
+  '@opencode-ai/models@0.0.15': {}
 
   '@oxc-project/types@0.138.0': {}
 

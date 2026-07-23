@@ -9,6 +9,11 @@ import {
   Settings2,
   Trash2,
   CheckCircle2,
+  TextInitial,
+  Image,
+  Video,
+  AudioLines,
+  FileText,
   LayersPlus,
   LoaderCircle,
   Zap
@@ -16,7 +21,13 @@ import {
 
 import { modelProviderApi } from '@/apis/system_api'
 import { useConfigStore } from '@/stores/config'
-import { modelIcons } from '@/utils/modelIcon'
+import { modelAvatars } from '@/utils/modelIcon'
+import {
+  formatModelPriceDisplay,
+  loadModelMetadataCatalog,
+  resolveModelDisplayMetadata,
+  USD_TO_CNY_RATE
+} from '@/utils/modelMetadata'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 import ExtensionCardGrid from '@/components/extensions/ExtensionCardGrid.vue'
@@ -36,9 +47,13 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: 'anthropic', label: 'Anthropic Messages API' }
 ]
 
-const providerTypeLabelMap = Object.fromEntries(
-  PROVIDER_TYPE_OPTIONS.map((option) => [option.value, option.label])
-)
+const MODALITY_DISPLAY = {
+  text: { icon: TextInitial, label: '文本输入' },
+  image: { icon: Image, label: '图像输入' },
+  video: { icon: Video, label: '视频输入' },
+  audio: { icon: AudioLines, label: '音频输入' },
+  pdf: { icon: FileText, label: 'PDF 文档输入' }
+}
 
 // Provider form state
 const showProviderModal = ref(false)
@@ -88,10 +103,12 @@ const remoteModelsMap = ref({})
 
 // Remote model loading state per provider
 const remoteModelsLoaded = ref({})
+const modelCatalogProviders = ref({})
 
 // Remote model search state per provider
 const remoteModelSearch = ref({})
 const remoteModelTypeFilter = ref({})
+const priceCurrency = ref('USD')
 const filteredProviders = computed(() => {
   const keyword = searchQuery.value.trim().toLowerCase()
   const filtered = keyword
@@ -125,45 +142,10 @@ const providerStats = computed(() => {
 })
 
 // ============ Helpers ============
-const getProviderIcon = (provider) => {
+const getProviderAvatar = (provider) => {
   const providerId = provider?.provider_id?.toLowerCase()
   const providerType = provider?.provider_type?.toLowerCase()
-  return modelIcons[providerId] || modelIcons[providerType] || modelIcons.default
-}
-
-const getProviderTypeLabel = (providerType) =>
-  providerTypeLabelMap[providerType] || providerType || '-'
-
-const getIconUrl = (icon) => {
-  if (!icon) return modelIcons.default
-  if (typeof icon === 'string') return icon
-  if (icon instanceof URL || icon?.default) return icon.default || icon
-  return modelIcons.default
-}
-
-const formatContextLength = (len) => {
-  if (!len) return '-'
-  if (len >= 1000000) return `${(len / 1000000).toFixed(1)}M`
-  if (len >= 1000) return `${(len / 1000).toFixed(0)}K`
-  return len.toString()
-}
-
-const formatMtokenPrice = (pricing) => {
-  if (!pricing) return null
-  const prompt = parseFloat(pricing.prompt || pricing.prompt_price || 0)
-  const completion = parseFloat(pricing.completion || pricing.completion_price || 0)
-  if (prompt < 0 || completion < 0) return null
-  if (prompt === 0 && completion === 0) return null
-  return {
-    prompt: prompt * 100000,
-    completion: completion * 100000
-  }
-}
-
-const formatPriceDisplay = (pricing) => {
-  const p = formatMtokenPrice(pricing)
-  if (!p) return null
-  return `$${p.prompt.toFixed(2)} / $${p.completion.toFixed(2)}`
+  return modelAvatars[providerId] || modelAvatars[providerType] || modelAvatars.default
 }
 
 const getModelDisplayName = (model) => {
@@ -211,13 +193,27 @@ const getModelTestTitle = (providerId, model) => {
   return `${statusText}: ${result.message || '无详细信息'}`
 }
 
-const getInputModalities = (model) => {
-  if (!model) return []
-  if (model.input_modalities) return model.input_modalities
-  if (model.architecture?.input_modalities) return model.architecture.input_modalities
-  if (model.raw_metadata?.architecture?.input_modalities)
-    return model.raw_metadata.architecture.input_modalities
-  return []
+const getProviderModelInfo = (providerId, model) =>
+  resolveModelDisplayMetadata(modelCatalogProviders.value, providerId, model)
+
+const getRemoteModelPriceDisplay = (providerId, model) =>
+  formatModelPriceDisplay(getProviderModelInfo(providerId, model).price, priceCurrency.value)
+
+const togglePriceCurrency = () => {
+  priceCurrency.value = priceCurrency.value === 'CNY' ? 'USD' : 'CNY'
+}
+
+const getModalityDisplay = (modality) =>
+  MODALITY_DISPLAY[modality] || { icon: FileText, label: modality }
+
+const loadModelMetadata = async () => {
+  if (Object.keys(modelCatalogProviders.value).length) return
+  try {
+    const catalog = await loadModelMetadataCatalog()
+    modelCatalogProviders.value = catalog.providers
+  } catch (error) {
+    console.warn('Failed to load model metadata catalog:', error)
+  }
 }
 
 const remoteIdsMap = computed(() => {
@@ -259,9 +255,9 @@ const remoteModelTypeOptions = computed(() => {
   }, {})
   return [
     { label: `全部 ${models.length}`, value: 'all' },
-    { label: `Chat ${counts.chat || 0}`, value: 'chat' },
-    { label: `Embedding ${counts.embedding || 0}`, value: 'embedding' },
-    { label: `Rerank ${counts.rerank || 0}`, value: 'rerank' }
+    { label: `对话 ${counts.chat || 0}`, value: 'chat' },
+    { label: `向量 ${counts.embedding || 0}`, value: 'embedding' },
+    { label: `重排 ${counts.rerank || 0}`, value: 'rerank' }
   ]
 })
 
@@ -303,14 +299,13 @@ const loadProviders = async () => {
 
 function getProviderInfo(provider) {
   return [
-    { label: 'Provider Type', value: getProviderTypeLabel(provider.provider_type) },
     { label: 'Base URL', value: provider.base_url || '-' },
     { label: '能力', value: provider.capabilities?.join(', ') || 'chat' }
   ]
 }
 
 function getProviderStatus(provider) {
-  if (!provider.is_enabled) return { label: '未启用', level: 'info' }
+  if (!provider.is_enabled) return { label: '未启用', level: 'info', showDot: false }
   if (provider.credential_status === 'warning') return { label: '凭证缺失', level: 'warning' }
   if (provider.is_enabled) return { label: '', level: 'success' }
   return null
@@ -486,6 +481,7 @@ const openModelsModal = (provider) => {
     remoteModelSearch.value[provider.provider_id] || ''
   remoteModelTypeFilter.value[provider.provider_id] = 'all'
   showModelsModal.value = true
+  loadModelMetadata()
 }
 
 // ============ Remote Models Operations ============
@@ -719,11 +715,18 @@ defineExpose({
         @click="openEditProviderModal(provider)"
       >
         <template #icon>
-          <img
-            v-if="getProviderIcon(provider)"
-            :src="getIconUrl(getProviderIcon(provider))"
-            :alt="provider.display_name"
-          />
+          <span
+            class="provider-avatar"
+            role="img"
+            :aria-label="`${provider.display_name} 图标`"
+            :style="{
+              background: getProviderAvatar(provider).background,
+              '--provider-avatar-scale': getProviderAvatar(provider).scale,
+              '--provider-avatar-filter': getProviderAvatar(provider).filter
+            }"
+          >
+            <img :src="getProviderAvatar(provider).icon" alt="" />
+          </span>
         </template>
         <template #footer>
           <button class="view-models-btn" type="button" @click.stop="openModelsModal(provider)">
@@ -970,7 +973,12 @@ defineExpose({
                   <LayersPlus :size="12" />
                 </span>
               </span>
-              <span class="col-context">{{ formatContextLength(model.context_length) }}</span>
+              <span class="col-context">
+                {{
+                  getProviderModelInfo(currentProviderForModels.provider_id, model).contextLabel ||
+                  '-'
+                }}
+              </span>
               <span class="col-dim">
                 <span
                   v-if="model.type === 'embedding' && !model.dimension"
@@ -999,13 +1007,21 @@ defineExpose({
                   />
                   <Zap v-else :size="13" />
                 </a-button>
-                <a-button size="small" class="lucide-icon-btn" @click="openModelConfigModal(model)">
+                <a-button
+                  size="small"
+                  class="lucide-icon-btn"
+                  :title="`配置 ${getModelDisplayName(model)}`"
+                  :aria-label="`配置 ${getModelDisplayName(model)}`"
+                  @click="openModelConfigModal(model)"
+                >
                   <Settings2 :size="13" />
                 </a-button>
                 <a-button
                   size="small"
                   danger
                   class="lucide-icon-btn"
+                  :title="`移除 ${getModelDisplayName(model)}`"
+                  :aria-label="`移除 ${getModelDisplayName(model)}`"
                   @click="removeModel(currentProviderForModels.provider_id, model.id)"
                 >
                   <Trash2 :size="13" />
@@ -1020,21 +1036,41 @@ defineExpose({
         <div class="models-section">
           <div class="remote-header">
             <h4 class="models-section-title">远端候选模型 ({{ filteredRemoteModels.length }})</h4>
-            <a-input
+            <div
               v-if="remoteModelsMap[currentProviderForModels.provider_id]?.length"
-              v-model:value="remoteModelSearch[currentProviderForModels.provider_id]"
-              class="remote-search-input"
-              placeholder="搜索模型..."
-              allow-clear
+              class="remote-controls"
             >
-              <template #prefix><Search :size="12" /></template>
-            </a-input>
-            <a-segmented
-              v-if="remoteModelsMap[currentProviderForModels.provider_id]?.length"
-              v-model:value="remoteModelTypeFilter[currentProviderForModels.provider_id]"
-              :options="remoteModelTypeOptions"
-              class="remote-type-filter"
-            />
+              <a-input
+                v-model:value="remoteModelSearch[currentProviderForModels.provider_id]"
+                class="remote-search-input"
+                placeholder="搜索模型..."
+                allow-clear
+                autocomplete="off"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
+                <template #prefix><Search :size="12" /></template>
+              </a-input>
+              <button
+                type="button"
+                class="currency-toggle"
+                :title="
+                  priceCurrency === 'CNY'
+                    ? `当前按人民币展示，点击切换美元（1 USD ≈ ¥${USD_TO_CNY_RATE}）`
+                    : `当前按美元展示，点击切换人民币（1 USD ≈ ¥${USD_TO_CNY_RATE}）`
+                "
+                :aria-label="priceCurrency === 'CNY' ? '切换为美元计费' : '切换为人民币计费'"
+                @click="togglePriceCurrency"
+              >
+                {{ priceCurrency === 'CNY' ? '¥' : '$' }}
+              </button>
+              <a-segmented
+                v-model:value="remoteModelTypeFilter[currentProviderForModels.provider_id]"
+                :options="remoteModelTypeOptions"
+                class="remote-type-filter"
+              />
+            </div>
           </div>
           <div
             class="remote-list"
@@ -1047,20 +1083,38 @@ defineExpose({
             >
               <span class="remote-name">{{ getModelDisplayName(remoteModel) }}</span>
               <div class="remote-tags">
+                <template
+                  v-for="mod in getProviderModelInfo(
+                    currentProviderForModels.provider_id,
+                    remoteModel
+                  ).inputModalities"
+                  :key="mod"
+                >
+                  <a-tooltip :title="getModalityDisplay(mod).label">
+                    <span
+                      class="modality-tag"
+                      role="img"
+                      :aria-label="getModalityDisplay(mod).label"
+                    >
+                      <component :is="getModalityDisplay(mod).icon" :size="13" />
+                    </span>
+                  </a-tooltip>
+                </template>
                 <span class="type-tag" :class="remoteModel.type || 'chat'">
                   {{ remoteModel.type || 'chat' }}
                 </span>
-                <template v-for="mod in getInputModalities(remoteModel) || []" :key="mod">
-                  <span class="modality-tag">{{ mod }}</span>
-                </template>
               </div>
               <span class="remote-context">{{
-                formatContextLength(remoteModel.context_length)
+                getProviderModelInfo(currentProviderForModels.provider_id, remoteModel)
+                  .contextLabel || '-'
               }}</span>
-              <span class="remote-price" v-if="formatMtokenPrice(remoteModel.pricing)">
-                {{ formatPriceDisplay(remoteModel.pricing) }}
+              <span
+                v-if="getRemoteModelPriceDisplay(currentProviderForModels.provider_id, remoteModel)"
+                class="remote-price"
+              >
+                {{ getRemoteModelPriceDisplay(currentProviderForModels.provider_id, remoteModel) }}
               </span>
-              <span class="remote-price placeholder" v-else>N/A</span>
+              <span v-else class="remote-price placeholder">N/A</span>
               <a-button
                 size="small"
                 :type="
@@ -1069,6 +1123,16 @@ defineExpose({
                     : 'default'
                 "
                 class="lucide-icon-btn"
+                :title="
+                  currentProviderForModels.enabled_models?.some((m) => m.id === remoteModel.id)
+                    ? `${getModelDisplayName(remoteModel)} 已启用`
+                    : `启用 ${getModelDisplayName(remoteModel)}`
+                "
+                :aria-label="
+                  currentProviderForModels.enabled_models?.some((m) => m.id === remoteModel.id)
+                    ? `${getModelDisplayName(remoteModel)} 已启用`
+                    : `启用 ${getModelDisplayName(remoteModel)}`
+                "
                 :disabled="
                   currentProviderForModels.enabled_models?.some((m) => m.id === remoteModel.id)
                 "
@@ -1083,6 +1147,12 @@ defineExpose({
                 <Plus :size="13" v-else />
               </a-button>
             </div>
+          </div>
+          <div v-if="Object.keys(modelCatalogProviders).length" class="model-metadata-source">
+            部分信息（价格、能力等）来自
+            <a href="https://models.dev" target="_blank" rel="noreferrer">models.dev</a>
+            填补。人民币价格按固定汇率 1 USD = ¥{{ USD_TO_CNY_RATE }}
+            换算。以上信息仅供参考，可能和官网或实时汇率有偏差。
           </div>
           <div class="remote-fetch-actions"></div>
         </div>
@@ -1157,9 +1227,27 @@ defineExpose({
   height: 100%;
   min-height: 0;
 
-  :deep(.info-card-icon img) {
-    width: 30px;
-    height: 30px;
+  :deep(.info-card-icon) {
+    border: none;
+    background: transparent;
+  }
+}
+
+.provider-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  overflow: hidden;
+  border: 1px solid rgb(0 0 0 / 6%);
+  border-radius: 8px;
+
+  img {
+    width: calc(100% * var(--provider-avatar-scale));
+    height: calc(100% * var(--provider-avatar-scale));
+    object-fit: contain;
+    filter: var(--provider-avatar-filter);
   }
 }
 
@@ -1377,7 +1465,6 @@ defineExpose({
 .remote-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
 
   .models-section-title {
@@ -1386,8 +1473,43 @@ defineExpose({
   }
 }
 
+.remote-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
+}
+
 .remote-search-input {
   width: 180px;
+}
+
+.currency-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  background: var(--gray-0);
+  color: var(--gray-700);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--gray-200);
+    background: var(--gray-25);
+    color: var(--gray-900);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--main-200);
+    outline-offset: 1px;
+  }
 }
 
 .remote-type-filter {
@@ -1430,12 +1552,12 @@ defineExpose({
 .modality-tag {
   display: inline-flex;
   align-items: center;
-  padding: 2px 6px;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   border-radius: 3px;
   background: var(--color-accent-50);
   color: var(--color-accent-700);
-  font-size: 10px;
-  font-weight: 500;
 }
 
 .dim-warning {
@@ -1463,6 +1585,16 @@ defineExpose({
 
   &.placeholder {
     color: var(--gray-400);
+  }
+}
+
+.model-metadata-source {
+  color: var(--gray-500);
+  font-size: 11px;
+  line-height: 1.5;
+
+  a {
+    color: var(--main-600);
   }
 }
 

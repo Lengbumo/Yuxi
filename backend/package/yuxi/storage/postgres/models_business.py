@@ -17,6 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
+from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
 
 Base = declarative_base()
@@ -91,7 +92,7 @@ class User(Base):
             "username": self.username,
             "uid": self.uid,
             "phone_number": self.phone_number,
-            "avatar": self.avatar,
+            "avatar": normalize_public_minio_url(self.avatar),
             "role": self.role,
             "department_id": self.department_id,
             "created_at": format_utc_datetime(self.created_at),
@@ -212,8 +213,8 @@ class Agent(Base):
             "backend_id": self.backend_id,
             "name": self.name,
             "description": self.description,
-            "icon": self.icon,
-            "pics": self.pics or [],
+            "icon": normalize_public_minio_url(self.icon),
+            "pics": [normalize_public_minio_url(pic) for pic in (self.pics or [])],
             "config_json": self.config_json or {},
             "share_config": self.share_config or {},
             "is_default": bool(self.is_default),
@@ -886,4 +887,78 @@ Index(
     unique=True,
     postgresql_where=AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
     sqlite_where=AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
+)
+
+
+class AgentRunRequest(Base):
+    """AgentRunRequest table - 智能体线程请求队列表。
+
+    表示一次用户/外部请求；派发后由对应 AgentRun 表达执行状态。
+    外部统一以 request_id 作为幂等键引用；id 为自增主键，仅用于 FIFO 排序。
+    """
+
+    __tablename__ = "agent_run_requests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="Primary key")
+    request_id = Column(String(64), unique=True, index=True, nullable=False, comment="幂等请求 ID")
+    uid = Column(String(64), nullable=False, comment="UID")
+    agent_slug = Column(String(64), nullable=False, comment="Agent slug")
+    conversation_thread_id = Column(String(64), nullable=False, comment="Conversation thread ID")
+    source = Column(String(32), nullable=False, default="chat", comment="请求来源: chat/agent_call/eval")
+    queue_policy = Column(
+        String(16),
+        nullable=False,
+        default="enqueue",
+        comment="排队策略: enqueue/reject",
+    )
+    status = Column(
+        String(32),
+        nullable=False,
+        default="queued",
+        comment="请求状态: queued/dispatched/cancelled/rejected/failed",
+    )
+    input_message_id = Column(Integer, ForeignKey("messages.id"), nullable=False, comment="关联输入消息 ID")
+    dispatched_run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True, comment="已派发的 AgentRun ID")
+    input_payload = Column(JSON, nullable=False, default=dict, comment="原始输入载荷快照")
+    error_message = Column(Text, nullable=True, comment="rejected/failed 时的错误信息")
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive, comment="创建时间")
+    dispatched_at = Column(DateTime, nullable=True, comment="派发时间")
+    updated_at = Column(
+        DateTime,
+        nullable=False,
+        default=utc_now_naive,
+        onupdate=utc_now_naive,
+        comment="更新时间",
+    )
+
+    # Relationships
+    input_message = relationship("Message", foreign_keys=[input_message_id])
+    dispatched_run = relationship("AgentRun", foreign_keys=[dispatched_run_id])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "uid": self.uid,
+            "agent_slug": self.agent_slug,
+            "thread_id": self.conversation_thread_id,
+            "source": self.source,
+            "queue_policy": self.queue_policy,
+            "status": self.status,
+            "input_message_id": self.input_message_id,
+            "dispatched_run_id": self.dispatched_run_id,
+            "error_message": self.error_message,
+            "created_at": format_utc_datetime(self.created_at),
+            "dispatched_at": format_utc_datetime(self.dispatched_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }
+
+
+Index(
+    "ix_agent_run_requests_queue",
+    AgentRunRequest.uid,
+    AgentRunRequest.agent_slug,
+    AgentRunRequest.conversation_thread_id,
+    AgentRunRequest.status,
+    AgentRunRequest.created_at,
+    AgentRunRequest.id,
 )

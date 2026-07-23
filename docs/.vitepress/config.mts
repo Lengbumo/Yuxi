@@ -43,6 +43,7 @@ export default defineConfig({
         text: '智能体开发',
         items: [
           { text: '智能体配置', link: '/agents/agents-config' },
+          { text: 'Agent 请求队列', link: '/agents/agent-request-queue' },
           { text: '工具系统', link: '/agents/tools-system' },
           { text: '中间件', link: '/agents/middleware' },
           { text: '智能体评估', link: '/agents/agent-evaluation' },

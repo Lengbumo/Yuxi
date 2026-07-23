@@ -20,6 +20,9 @@ export const isMentionAgentResourceKind = (kind) => MENTION_AGENT_RESOURCE_KINDS
 
 export const getAgentConfigOptions = (item) => (Array.isArray(item?.options) ? item.options : [])
 
+export const isSingleSelectAgentConfig = (item) =>
+  getAgentConfigOptions(item).length > 0 && ['str', 'string', 'select'].includes(item?.type)
+
 export const getAgentConfigOptionValue = (option) => {
   if (typeof option !== 'object' || option === null) return option
   return (

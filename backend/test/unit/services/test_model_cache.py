@@ -38,7 +38,7 @@ def test_model_cache_prefers_model_base_url_override(monkeypatch):
 
     class Provider:
         is_enabled = True
-        provider_id = "alibaba"
+        provider_id = "alibaba-cn"
         api_key = "sk-test"
         api_key_env = None
         provider_type = "openai"
@@ -61,7 +61,7 @@ def test_model_cache_prefers_model_base_url_override(monkeypatch):
 
     cache.rebuild([Provider()])
 
-    assert saved_cache["alibaba:qwen3-rerank"].base_url == "https://invalid.example/rerank"
+    assert saved_cache["alibaba-cn:qwen3-rerank"].base_url == "https://invalid.example/rerank"
 
 
 def test_model_cache_loads_from_redis_and_uses_local_ttl(monkeypatch: pytest.MonkeyPatch):

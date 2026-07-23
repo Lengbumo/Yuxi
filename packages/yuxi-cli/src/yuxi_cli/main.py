@@ -22,13 +22,21 @@ from yuxi_cli.commands import (
     whoami as whoami_command,
 )
 from yuxi_cli.config import ConfigError, ConfigStore
+from yuxi_cli.kb import (
+    KbError,
+    run_kb_files,
+    run_kb_find,
+    run_kb_list,
+    run_kb_open,
+    run_kb_query,
+)
 from yuxi_cli.kb_upload import DEFAULT_CONCURRENCY, MAX_CONCURRENCY, KbUploadError, KbUploadOptions, run_kb_upload
 
 console = Console()
 app = typer.Typer(help="Yuxi command line client.", invoke_without_command=True)
 remote_app = typer.Typer(help="Manage Yuxi remotes.")
 agent_app = typer.Typer(help="Run and manage Yuxi agents.")
-kb_app = typer.Typer(help="Upload and manage knowledge base files.")
+kb_app = typer.Typer(help="Manage and query knowledge bases (upload, list, files, query, open, find).")
 app.add_typer(remote_app, name="remote")
 app.add_typer(agent_app, name="agent")
 app.add_typer(kb_app, name="kb")
@@ -189,6 +197,134 @@ def upload_knowledge_base_files(
         _print_remote_context(store, remote)
         run_kb_upload(store, remote, options, console)
     except (ConfigError, ClientError, KbUploadError) as exc:
+        _handle_error(exc)
+
+
+@kb_app.command("list")
+def list_knowledge_bases(
+    remote: str | None = typer.Option(None, "--remote", help="Remote name."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+):
+    """List knowledge bases visible to the current user."""
+    store = _store()
+    try:
+        if not as_json:
+            _print_remote_context(store, remote)
+        run_kb_list(store, remote, console, as_json=as_json)
+    except (ConfigError, ClientError, KbError) as exc:
+        _handle_error(exc)
+
+
+@kb_app.command("files")
+def list_kb_files(
+    kb_id: str = typer.Option(..., "--kb-id", help="Knowledge base ID."),
+    query: str | None = typer.Option(None, "--query", help="Filename keyword."),
+    offset: int = typer.Option(0, "--offset", min=0, help="Offset from 0."),
+    limit: int = typer.Option(100, "--limit", min=1, max=500, help="Page size."),
+    status: str = typer.Option("all", "--status", help="File status filter."),
+    remote: str | None = typer.Option(None, "--remote", help="Remote name."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+):
+    """List or search files in a knowledge base."""
+    store = _store()
+    try:
+        if not as_json:
+            _print_remote_context(store, remote)
+        run_kb_files(
+            store,
+            remote,
+            kb_id,
+            console,
+            query=query,
+            offset=offset,
+            limit=limit,
+            status=status,
+            as_json=as_json,
+        )
+    except (ConfigError, ClientError, KbError) as exc:
+        _handle_error(exc)
+
+
+@kb_app.command("query")
+def query_kb(
+    kb_id: str = typer.Option(..., "--kb-id", help="Knowledge base ID."),
+    query: str = typer.Argument(..., help="Question or query text."),
+    file_name: str | None = typer.Option(None, "--file-name", help="Restrict to a filename keyword."),
+    top_k: int | None = typer.Option(None, "--top-k", min=1, help="Top K chunks to retrieve."),
+    search_mode: str | None = typer.Option(None, "--search-mode", help="Retrieval mode, e.g. hybrid."),
+    remote: str | None = typer.Option(None, "--remote", help="Remote name."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+):
+    """Retrieve chunks from a knowledge base."""
+    store = _store()
+    try:
+        if not as_json:
+            _print_remote_context(store, remote)
+        run_kb_query(
+            store,
+            remote,
+            kb_id,
+            query,
+            console,
+            file_name=file_name,
+            top_k=top_k,
+            search_mode=search_mode,
+            as_json=as_json,
+        )
+    except (ConfigError, ClientError, KbError) as exc:
+        _handle_error(exc)
+
+
+@kb_app.command("open")
+def open_kb_file(
+    kb_id: str = typer.Option(..., "--kb-id", help="Knowledge base ID."),
+    file_id: str = typer.Option(..., "--file-id", help="File ID to open."),
+    offset: int = typer.Option(0, "--offset", min=0, help="Start line offset."),
+    limit: int = typer.Option(200, "--limit", min=1, max=1800, help="Number of lines."),
+    remote: str | None = typer.Option(None, "--remote", help="Remote name."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+):
+    """Open a parsed file content window."""
+    store = _store()
+    try:
+        if not as_json:
+            _print_remote_context(store, remote)
+        run_kb_open(store, remote, kb_id, file_id, console, offset=offset, limit=limit, as_json=as_json)
+    except (ConfigError, ClientError, KbError) as exc:
+        _handle_error(exc)
+
+
+@kb_app.command("find")
+def find_in_kb_file(
+    kb_id: str = typer.Option(..., "--kb-id", help="Knowledge base ID."),
+    file_id: str = typer.Option(..., "--file-id", help="File ID to search in."),
+    patterns: list[str] = typer.Option(..., "--pattern", "-p", help="Keyword or regex pattern (repeatable)."),
+    regex: bool = typer.Option(False, "--regex", help="Treat patterns as regex."),
+    case_sensitive: bool = typer.Option(False, "--case-sensitive", help="Case sensitive match."),
+    max_windows: int = typer.Option(5, "--max-windows", min=1, max=20, help="Max match windows."),
+    window_size: int = typer.Option(80, "--window-size", min=1, max=200, help="Lines per window."),
+    remote: str | None = typer.Option(None, "--remote", help="Remote name."),
+    as_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+):
+    """Find keyword or regex matches inside a file."""
+    store = _store()
+    try:
+        if not as_json:
+            _print_remote_context(store, remote)
+        run_kb_find(
+            store,
+            remote,
+            kb_id,
+            file_id,
+            patterns,
+            console,
+            use_regex=regex,
+            case_sensitive=case_sensitive,
+            max_windows=max_windows,
+            window_size=window_size,
+            as_json=as_json,
+        )
+    except (ConfigError, ClientError, KbError) as exc:
         _handle_error(exc)
 
 

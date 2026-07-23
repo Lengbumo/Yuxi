@@ -5,6 +5,13 @@ const createOnGoingConvState = () => ({
   toolCallBuffers: {}
 })
 
+const IDLE_QUEUE_SNAPSHOT = Object.freeze({
+  status: 'idle',
+  paused_reason: null,
+  blocking_run_id: null,
+  can_continue: false
+})
+
 export function useAgentThreadState({
   chatState,
   getCurrentThreadId,
@@ -32,7 +39,11 @@ export function useAgentThreadState({
         pendingInterrupt: null,
         onGoingConv: createOnGoingConvState(),
         agentState: null,
-        contextCompressing: false
+        contextCompressing: false,
+        queuedRequests: [],
+        queueSnapshot: { ...IDLE_QUEUE_SNAPSHOT },
+        continueQueueInFlight: false,
+        requestStreams: {}
       }
     }
     return chatState.threadStates[threadId]
@@ -42,6 +53,13 @@ export function useAgentThreadState({
     if (!threadId) return
     if (typeof onStopThread === 'function') {
       onStopThread(threadId)
+    }
+  }
+
+  const abortAllRequestStreams = (threadState) => {
+    if (!threadState?.requestStreams) return
+    for (const entry of Object.values(threadState.requestStreams)) {
+      entry.controller?.abort()
     }
   }
 
@@ -57,10 +75,14 @@ export function useAgentThreadState({
     if (threadState.runStreamAbortController) {
       threadState.runStreamAbortController.abort()
     }
+    abortAllRequestStreams(threadState)
     delete chatState.threadStates[threadId]
   }
 
-  const resetOnGoingConv = (threadId = null) => {
+  const resetOnGoingConv = (
+    threadId = null,
+    { preserveRunStream = false, preserveRequestStreams = false } = {}
+  ) => {
     const targetThreadId =
       threadId || (typeof getCurrentThreadId === 'function' ? getCurrentThreadId() : null)
 
@@ -72,9 +94,13 @@ export function useAgentThreadState({
         onBeforeResetThread(targetThreadId)
       }
 
-      if (threadState.runStreamAbortController) {
+      if (!preserveRunStream && threadState.runStreamAbortController) {
         threadState.runStreamAbortController.abort()
         threadState.runStreamAbortController = null
+      }
+      if (!preserveRequestStreams && threadState.requestStreams) {
+        abortAllRequestStreams(threadState)
+        threadState.requestStreams = {}
       }
 
       threadState.onGoingConv = createOnGoingConvState()
@@ -94,3 +120,5 @@ export function useAgentThreadState({
     stopThreadStream
   }
 }
+
+export { IDLE_QUEUE_SNAPSHOT }

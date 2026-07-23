@@ -81,3 +81,5 @@ docs/vibe
 /models
 
 .taskr/
+web/src/utils/__tests__/
+web/test/

@@ -66,10 +66,7 @@
 
                 <!-- 单选 -->
                 <a-select
-                  v-else-if="
-                    getConfigOptions(value).length > 0 &&
-                    (value?.type === 'str' || value?.type === 'select')
-                  "
+                  v-else-if="isSingleSelectAgentConfig(value)"
                   :value="agentConfig[key]"
                   :disabled="isReadOnlyConfig"
                   @update:value="(val) => updateConfigValue(key, val)"
@@ -398,7 +395,8 @@ import {
   getAgentConfigOptionLabel as getOptionLabel,
   getAgentConfigOptions as getConfigOptions,
   getAgentConfigOptionValue as getOptionValue,
-  isDefaultAllAgentResourceKind
+  isDefaultAllAgentResourceKind,
+  isSingleSelectAgentConfig
 } from '@/utils/agentConfigUtils'
 import { storeToRefs } from 'pinia'
 
@@ -515,7 +513,7 @@ const navigateToConfigPage = (kind) => {
         router.push({ path: '/extensions', query: { tab: 'skills' } })
         break
       case 'subagents':
-        router.push({ path: '/model-manage', query: { tab: 'agents' } })
+        router.push({ path: '/agent-manage', query: { tab: 'agents' } })
         break
     }
   }, 100)

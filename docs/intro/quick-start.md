@@ -20,7 +20,7 @@
 
 ```bash
 # 克隆最新版本
-git clone --branch v0.7.1.beta1 --depth 1 https://github.com/xerrors/Yuxi.git
+git clone --branch v0.7.1 --depth 1 https://github.com/xerrors/Yuxi.git
 cd Yuxi
 ```
 
@@ -28,7 +28,7 @@ cd Yuxi
 
 | 版本 | 适用场景 |
 |------|----------|
-| v0.7.0 | 当前稳定版本，推荐生产使用 |
+| v0.7.1 | 当前稳定版本，推荐生产使用 |
 | main | 开发版本，包含最新特性（可能不稳定） |
 
 ### 步骤二：配置环境变量
@@ -112,7 +112,7 @@ docker logs api-dev -f
 docker logs web-dev -f
 ```
 
-### 常见问题
+### 部署故障排查
 
 <details>
 <summary><strong>Docker 镜像拉取失败</strong></summary>

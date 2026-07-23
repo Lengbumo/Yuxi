@@ -1,41 +1,59 @@
 """知识库工具模块"""
 
-import inspect
+from pathlib import Path
 from typing import Any
 
 from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
 
+from yuxi.agents.backends.sandbox.paths import (
+    ensure_thread_dirs,
+    sandbox_outputs_dir,
+    virtual_path_for_thread_file,
+)
 from yuxi.agents.toolkits.registry import tool
-from yuxi.knowledge.base import KnowledgeBase
 from yuxi.knowledge.schemas import (
     FindInputSchema,
-    FindOutputSchema,
     OpenInputSchema,
-    OpenOutputSchema,
     SearchInputSchema,
-    SearchOutputSchema,
 )
 from yuxi.utils import logger
 
-# ========== 通用知识库工具函数 ==========
+# ========== 通用知识库工具 ==========
 
 
-def _get_knowledge_base():
-    from yuxi import knowledge_base
+def get_common_kb_tools() -> list:
+    """获取通用知识库工具列表
 
-    return knowledge_base
+    返回 7 个通用工具：
+    - list_kbs: 列出用户可访问的知识库
+    - get_mindmap: 获取指定知识库的思维导图
+    - query_kb: 在指定知识库中检索
+    - find_kb_document: 在指定文件内定位关键词或正则模式
+    - open_kb_document: 按 file_id 分段打开知识库文档
+    - search_file: 搜索知识库中的文件
+    - download_kb_file: 按 file_id 下载知识库原始文件到沙盒 outputs
+    """
+    return [
+        list_kbs,
+        get_mindmap,
+        query_kb,
+        find_kb_document,
+        open_kb_document,
+        search_file,
+        download_kb_file,
+    ]
 
 
 class ListKBsInput(BaseModel):
     """列出用户可访问的知识库输入模型"""
 
     # Langchain 的 runtime 注入机制要求必须有参数
-    dummy: str = Field(default="", description="Dummy parameter - ignore")  # Add this
+    dummy: str = Field(default="", description="Dummy parameter - ignore")
 
 
 @tool(category="knowledge", tags=["知识库"], args_schema=ListKBsInput)
-async def list_kbs(dummy: str, runtime: ToolRuntime) -> str:  # Now has 2 params
+async def list_kbs(dummy: str, runtime: ToolRuntime) -> str:
     """列出当前用户可访问的知识库列表
 
     返回用户基于权限可访问的知识库名称列表。这个列表是根据用户的角色和部门信息过滤后的结果，
@@ -44,41 +62,24 @@ async def list_kbs(dummy: str, runtime: ToolRuntime) -> str:  # Now has 2 params
     Returns:
         用户可访问的知识库名称列表（字符串格式）
     """
-    # 从 runtime.context 获取用户信息
     runtime_context = runtime.context
     uid = getattr(runtime_context, "uid", None)
     if not uid:
         return "无法获取用户信息"
 
-    # 打印 runtime—context 中的所有信息以进行调试
-    logger.debug(f"Runtime context: {runtime_context.__dict__}")
-
-    enabled_kb_names = getattr(runtime_context, "knowledges", None)
-
-    try:
-        from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
-
-        available_kbs = await resolve_visible_knowledge_bases_for_context(runtime_context)
-    except Exception as e:
-        logger.error(f"获取用户知识库列表失败: {e}")
-        return f"获取知识库列表失败: {str(e)}"
-
-    all_kb_names = [kb["name"] for kb in available_kbs]
-
-    logger.debug(f"用户 {uid} 可访问的知识库列表: {all_kb_names}")
-    logger.debug(f"用户 {uid} 当前对话启用的知识库列表: {enabled_kb_names}")
-
+    available_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
     if not available_kbs:
         return "当前没有可访问的知识库"
 
     # 格式化输出（包含名称和描述）
-    kb_list = []
-    for kb in available_kbs:
-        name = kb.get("name", "")
-        desc = kb.get("description") or "无描述"
-        kb_list.append({"kb_id": kb.get("kb_id"), "name": name, "description": desc})
-
-    return kb_list
+    return [
+        {
+            "kb_id": kb.get("kb_id"),
+            "name": kb.get("name", ""),
+            "description": kb.get("description") or "无描述",
+        }
+        for kb in available_kbs
+    ]
 
 
 class GetMindmapInput(BaseModel):
@@ -153,55 +154,6 @@ async def get_mindmap(kb_name: str, runtime: ToolRuntime) -> str:
 
 
 QueryKBInput = SearchInputSchema
-OpenKBDocumentInput = OpenInputSchema
-FindKBDocumentInput = FindInputSchema
-
-
-async def _resolve_visible_knowledge_bases_for_query(runtime: ToolRuntime | None) -> list[dict[str, Any]]:
-    if runtime is None:
-        return []
-
-    context = getattr(runtime, "context", None)
-    if context is None:
-        return []
-
-    visible_kbs = getattr(context, "_visible_knowledge_bases", None)
-    if isinstance(visible_kbs, list):
-        return visible_kbs
-
-    try:
-        from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
-
-        return await resolve_visible_knowledge_bases_for_context(context)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"解析会话可见知识库失败: {exc}")
-        return []
-
-
-def _find_query_target(
-    *,
-    kb_id: str,
-    retrievers: dict[str, Any],
-    visible_kbs: list[dict[str, Any]],
-) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    if not visible_kbs:
-        return None, None, "无法获取当前会话可访问的知识库"
-
-    normalized_kb_id = str(kb_id or "").strip()
-    visible_kb_ids = {str(kb.get("kb_id") or "").strip() for kb in visible_kbs}
-    if normalized_kb_id not in visible_kb_ids:
-        return None, None, f"知识库资源 '{normalized_kb_id}' 不存在或当前会话未启用"
-
-    target_info = retrievers.get(normalized_kb_id)
-    if target_info is None:
-        return None, None, f"知识库资源 '{normalized_kb_id}' 不存在"
-    return target_info, normalized_kb_id, None
-
-
-async def _build_query_output(target_kb_id: str, result: Any) -> Any:
-    if isinstance(result, dict) and result.get("kb_id") == target_kb_id and isinstance(result.get("results"), list):
-        return SearchOutputSchema(**result).model_dump()
-    return KnowledgeBase.build_search_output(target_kb_id, result)
 
 
 @tool(category="knowledge", tags=["知识库"], args_schema=QueryKBInput)
@@ -216,33 +168,20 @@ async def query_kb(kb_id: str, query_text: str, file_name: str | None = None, ru
     if not query_text:
         return "请提供查询内容"
 
-    knowledge_base = _get_knowledge_base()
-    retrievers = knowledge_base.get_retrievers()
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
-    target_info, target_kb_id, target_error = _find_query_target(
-        kb_id=kb_id,
-        retrievers=retrievers,
-        visible_kbs=visible_kbs,
-    )
+    target_kb_id, target_error = _find_query_target(kb_id=kb_id, visible_kbs=visible_kbs)
     if target_error:
         return target_error
 
     try:
-        retriever = target_info["retriever"]
-        kwargs = {}
-        if file_name:
-            kwargs["file_name"] = file_name
-
-        if inspect.iscoroutinefunction(retriever):
-            result = await retriever(query_text, **kwargs)
-        else:
-            result = retriever(query_text, **kwargs)
-
-        return await _build_query_output(target_kb_id, result)
-
+        kwargs = {"file_name": file_name} if file_name else {}
+        return await _get_knowledge_base().retrieve(target_kb_id, query_text, **kwargs)
     except Exception as e:
         logger.error(f"检索失败: {e}")
         return f"检索失败: {str(e)}"
+
+
+OpenKBDocumentInput = OpenInputSchema
 
 
 @tool(category="knowledge", tags=["知识库"], args_schema=OpenKBDocumentInput)
@@ -267,37 +206,24 @@ async def open_kb_document(
         return "请提供 file_id"
 
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
-    if not visible_kbs:
-        return "无法获取当前会话可访问的知识库"
-
-    visible_kb_ids = {str(kb.get("kb_id") or "").strip() for kb in visible_kbs}
-    if normalized_kb_id not in visible_kb_ids:
-        return f"知识库资源 '{normalized_kb_id}' 不存在或当前会话未启用"
-
-    knowledge_base = _get_knowledge_base()
-    retrievers = knowledge_base.get_retrievers()
-    target_info = retrievers.get(normalized_kb_id)
-    if target_info is None:
-        return f"知识库资源 '{normalized_kb_id}' 不存在"
-
-    metadata = target_info.get("metadata") if isinstance(target_info, dict) else None
-    kb_type = str((metadata or {}).get("kb_type") or "").strip().lower()
-    if kb_type == "dify":
-        return "Dify 知识库为外部只读检索源，当前不支持通过 Open 打开全文"
+    target_kb_id, target_error = _find_query_target(kb_id=normalized_kb_id, visible_kbs=visible_kbs)
+    if target_error:
+        return target_error
 
     try:
         start_offset = int(line) - 1 if line is not None else int(offset or 0)
-        window = await knowledge_base.open_file_content(
-            normalized_kb_id,
+        return await _get_knowledge_base().open_document(
+            target_kb_id,
             normalized_file_id,
             offset=start_offset,
             limit=window_size,
         )
-        return OpenOutputSchema(kb_id=normalized_kb_id, file_id=normalized_file_id, **window).model_dump()
-
     except Exception as e:
         logger.error(f"打开知识库文档失败: {e}")
         return f"打开知识库文档失败: {str(e)}"
+
+
+FindKBDocumentInput = FindInputSchema
 
 
 @tool(category="knowledge", tags=["知识库"], args_schema=FindKBDocumentInput)
@@ -325,27 +251,13 @@ async def find_kb_document(
         return "请提供 patterns"
 
     visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
-    if not visible_kbs:
-        return "无法获取当前会话可访问的知识库"
-
-    visible_kb_ids = {str(kb.get("kb_id") or "").strip() for kb in visible_kbs}
-    if normalized_kb_id not in visible_kb_ids:
-        return f"知识库资源 '{normalized_kb_id}' 不存在或当前会话未启用"
-
-    knowledge_base = _get_knowledge_base()
-    retrievers = knowledge_base.get_retrievers()
-    target_info = retrievers.get(normalized_kb_id)
-    if target_info is None:
-        return f"知识库资源 '{normalized_kb_id}' 不存在"
-
-    metadata = target_info.get("metadata") if isinstance(target_info, dict) else None
-    kb_type = str((metadata or {}).get("kb_type") or "").strip().lower()
-    if kb_type == "dify":
-        return "Dify 知识库为外部只读检索源，当前不支持通过 Find 检索全文"
+    target_kb_id, target_error = _find_query_target(kb_id=normalized_kb_id, visible_kbs=visible_kbs)
+    if target_error:
+        return target_error
 
     try:
-        result = await knowledge_base.find_file_content(
-            normalized_kb_id,
+        return await _get_knowledge_base().find_in_document(
+            target_kb_id,
             normalized_file_id,
             patterns,
             use_regex=use_regex,
@@ -353,15 +265,9 @@ async def find_kb_document(
             max_windows=max_windows,
             window_size=window_size,
         )
-        return FindOutputSchema(kb_id=normalized_kb_id, file_id=normalized_file_id, **result).model_dump()
     except Exception as e:
         logger.error(f"知识库文档内检索失败: {e}")
         return f"知识库文档内检索失败: {str(e)}"
-
-
-# 单个知识库一次最多扫描的文件数（与仓储层 list_by_kb_id_after 的硬上限保持一致），
-# 用于在内存中做文件名过滤与准确计数，避免按 limit+offset 截断导致 total/has_more 失真。
-_KB_FILE_SCAN_LIMIT = 5000
 
 
 class SearchFileInput(BaseModel):
@@ -410,64 +316,171 @@ async def search_file(
     else:
         target_kbs = visible_kbs
 
-    from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+    knowledge_base = _get_knowledge_base()
+    searchable_kbs = [kb for kb in target_kbs if knowledge_base.database_type_supports_documents(kb.get("kb_type"))]
+    if not searchable_kbs:
+        return "当前匹配的知识库只支持检索，不支持文件搜索"
+    return await knowledge_base.search_document_files(
+        searchable_kbs,
+        query=query,
+        offset=offset,
+        limit=limit,
+    )
 
-    repo = KnowledgeFileRepository()
 
-    all_files = []
-    for kb in target_kbs:
-        kb_id = kb.get("kb_id")
-        if not kb_id:
-            continue
+class DownloadKBFileInput(BaseModel):
+    """下载知识库原始文件输入模型"""
 
-        files = await repo.list_by_kb_id_after(
-            kb_id=kb_id,
-            limit=_KB_FILE_SCAN_LIMIT,
-            files_only=True,
-        )
+    kb_id: str = Field(description="知识库资源 ID")
+    file_id: str = Field(description="知识库文件 ID，来自 query_kb 或 search_file 的返回结果")
+    save_as: str | None = Field(
+        default=None,
+        description="落盘文件名；为空时使用原始文件名。仅取文件名部分，不可包含目录",
+    )
 
-        if query:
-            query_lower = query.lower()
-            files = [f for f in files if query_lower in f.filename.lower()]
 
-        for f in files:
-            all_files.append(
-                {
-                    "kb_id": kb_id,
-                    "kb_name": kb.get("name"),
-                    "file_id": f.file_id,
-                    "filename": f.filename,
-                    "file_type": f.file_type,
-                    "status": f.status,
-                    "created_at": str(f.created_at) if f.created_at else None,
-                    "updated_at": str(f.updated_at) if f.updated_at else None,
-                    "file_size": f.file_size,
-                }
-            )
+@tool(category="knowledge", tags=["知识库"], args_schema=DownloadKBFileInput)
+async def download_kb_file(
+    kb_id: str,
+    file_id: str,
+    save_as: str | None = None,
+    runtime: ToolRuntime = None,
+) -> dict[str, Any] | str:
+    """下载知识库文件的原始二进制（pdf/docx/xlsx 等）到沙盒 outputs 目录。
 
-    all_files.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
+    当后续需要对原始文件结构做处理时使用：例如用 openpyxl/pandas 读取 xlsx 单元格、
+    用 pdfplumber/python-docx 重新解析版面。query_kb/open_kb_document 只返回文本切片，
+    无法满足这类需要文件对象的场景。返回的 virtual_path 是沙盒内可见路径，可直接在代码中读取。
+    kb_id 是知识库资源 ID；file_id 来自 query_kb 或 search_file 的返回结果。
+    """
+    normalized_kb_id = str(kb_id or "").strip()
+    normalized_file_id = str(file_id or "").strip()
+    if not normalized_kb_id:
+        return "请提供 kb_id"
+    if not normalized_file_id:
+        return "请提供 file_id"
 
-    total = len(all_files)
-    paginated_files = all_files[offset : offset + limit]
+    visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
+    target_kb_id, target_error = _find_query_target(kb_id=normalized_kb_id, visible_kbs=visible_kbs)
+    if target_error:
+        return target_error
+
+    knowledge_base = _get_knowledge_base()
+    try:
+        data = await knowledge_base.get_file_download(target_kb_id, normalized_file_id, variant="original")
+    except ValueError as e:
+        return str(e)
+    except Exception as e:
+        logger.error(f"下载知识库原始文件失败: {e}")
+        return f"下载知识库原始文件失败: {str(e)}"
+
+    file_thread_id = _runtime_thread_id(runtime)
+    uid = _runtime_uid(runtime)
+    if not file_thread_id or not uid:
+        return "无法获取当前会话的沙盒上下文，缺少 file_thread_id 或 uid"
+
+    output_path = _resolve_download_output_path(file_thread_id, uid, data, normalized_file_id, save_as)
+    try:
+        output_path.write_bytes(data["content"])
+    except OSError as e:
+        logger.error(f"写入沙盒 outputs 失败: {e}")
+        return f"写入沙盒 outputs 失败: {str(e)}"
 
     return {
-        "files": paginated_files,
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "has_more": offset + limit < total,
+        "virtual_path": virtual_path_for_thread_file(file_thread_id, output_path, uid=uid),
+        "filename": data["filename"] or normalized_file_id,
+        "media_type": data["media_type"],
+        "size_bytes": len(data["content"]),
+        "saved_as": output_path.name,
     }
 
 
-def get_common_kb_tools() -> list:
-    """获取通用知识库工具列表
+# ========== 共享 helper（细节层） ==========
 
-    返回 6 个通用工具：
-    - list_kbs: 列出用户可访问的知识库
-    - get_mindmap: 获取指定知识库的思维导图
-    - query_kb: 在指定知识库中检索
-    - find_kb_document: 在指定文件内定位关键词或正则模式
-    - open_kb_document: 按 file_id 分段打开知识库文档
-    - search_file: 搜索知识库中的文件
-    """
-    return [list_kbs, get_mindmap, query_kb, find_kb_document, open_kb_document, search_file]
+
+def _get_knowledge_base():
+    from yuxi.knowledge.runtime import knowledge_base
+
+    return knowledge_base
+
+
+async def _resolve_visible_knowledge_bases_for_query(runtime: ToolRuntime | None) -> list[dict[str, Any]]:
+    if runtime is None:
+        return []
+
+    context = getattr(runtime, "context", None)
+    if context is None:
+        return []
+
+    visible_kbs = getattr(context, "_visible_knowledge_bases", None)
+    if isinstance(visible_kbs, list):
+        return visible_kbs
+
+    try:
+        from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
+
+        return await resolve_visible_knowledge_bases_for_context(context)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"解析会话可见知识库失败: {exc}")
+        return []
+
+
+def _find_query_target(
+    *,
+    kb_id: str,
+    visible_kbs: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    """校验 kb_id 在当前会话可见知识库内，返回 (kb_id, error)。"""
+    if not visible_kbs:
+        return None, "无法获取当前会话可访问的知识库"
+
+    normalized_kb_id = str(kb_id or "").strip()
+    visible_kb_ids = {str(kb.get("kb_id") or "").strip() for kb in visible_kbs}
+    if normalized_kb_id not in visible_kb_ids:
+        return None, f"知识库资源 '{normalized_kb_id}' 不存在或当前会话未启用"
+    return normalized_kb_id, None
+
+
+def _runtime_thread_id(runtime: ToolRuntime | None) -> str | None:
+    """从 runtime.context 取 file_thread_id（回退 thread_id）。"""
+    context = getattr(runtime, "context", None) if runtime else None
+    if context is None:
+        return None
+    return getattr(context, "file_thread_id", None) or getattr(context, "thread_id", None)
+
+
+def _runtime_uid(runtime: ToolRuntime | None) -> str | None:
+    """从 runtime.context 取 uid。"""
+    context = getattr(runtime, "context", None) if runtime else None
+    if context is None:
+        return None
+    return getattr(context, "uid", None)
+
+
+def _resolve_download_output_path(
+    file_thread_id: str,
+    uid: str,
+    data: dict[str, Any],
+    file_id: str,
+    save_as: str | None,
+) -> Path:
+    """计算沙盒 outputs 目录下的落盘路径，处理重名与路径穿越防护。"""
+    ensure_thread_dirs(file_thread_id, uid)
+    outputs_dir = sandbox_outputs_dir(file_thread_id)
+
+    # 仅取文件名部分，剥离任何目录，防止路径穿越
+    wanted_name = (save_as or data.get("filename") or file_id).strip()
+    base_name = Path(wanted_name).name or file_id
+
+    candidate = outputs_dir / base_name
+    if not candidate.exists():
+        return candidate
+
+    # 重名时追加 _1 / _2 ... 后缀
+    stem = candidate.stem
+    suffix = candidate.suffix
+    index = 1
+    while candidate.exists():
+        candidate = outputs_dir / f"{stem}_{index}{suffix}"
+        index += 1
+    return candidate

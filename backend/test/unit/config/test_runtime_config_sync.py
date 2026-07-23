@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
+import sys
 from contextlib import contextmanager
 
 import pytest
@@ -45,6 +47,59 @@ def _patch_runtime_redis(monkeypatch: pytest.MonkeyPatch, redis: _FakeRedis) -> 
     monkeypatch.setattr(config_cache, "sync_redis_client", fake_sync_redis_client)
 
 
+def _import_yuxi_in_fresh_process(tmp_path, config_text: str) -> tuple[dict, subprocess.CompletedProcess[str]]:
+    config_dir = tmp_path / "saves" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "base.toml").write_text(config_text, encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, sys; import yuxi; "
+                "print(json.dumps({"
+                "'default_ocr_engine': yuxi.config.default_ocr_engine, "
+                "'default_model': yuxi.config.default_model, "
+                "'factory_loaded': 'yuxi.knowledge.parser.factory' in sys.modules, "
+                "'parser_loaded': 'yuxi.knowledge.parser.unified' in sys.modules, "
+                "'manager_loaded': 'yuxi.knowledge.manager' in sys.modules"
+                "}))"
+            ),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout.splitlines()[-1]), result
+
+
+def test_fresh_import_loads_default_ocr_engine_without_initializing_knowledge_runtime(tmp_path):
+    loaded, result = _import_yuxi_in_fresh_process(
+        tmp_path,
+        'default_ocr_engine = "rapid_ocr"\ndefault_model = "test-provider:after-ocr"\n',
+    )
+
+    assert loaded == {
+        "default_ocr_engine": "rapid_ocr",
+        "default_model": "test-provider:after-ocr",
+        "factory_loaded": False,
+        "parser_loaded": False,
+        "manager_loaded": False,
+    }
+    assert "Failed to load config" not in result.stdout + result.stderr
+
+
+def test_fresh_import_ignores_invalid_ocr_engine_and_loads_later_config(tmp_path):
+    loaded, _ = _import_yuxi_in_fresh_process(
+        tmp_path,
+        'default_ocr_engine = "unknown-ocr"\ndefault_model = "test-provider:after-invalid-ocr"\n',
+    )
+
+    assert loaded["default_ocr_engine"] == "rapid_ocr"
+    assert loaded["default_model"] == "test-provider:after-invalid-ocr"
+
+
 def test_save_writes_runtime_snapshot_after_base_toml(tmp_path, monkeypatch: pytest.MonkeyPatch):
     redis = _FakeRedis()
     _patch_runtime_redis(monkeypatch, redis)
@@ -62,7 +117,6 @@ def test_save_writes_runtime_snapshot_after_base_toml(tmp_path, monkeypatch: pyt
     assert payload["enable_content_guard"] is True
     assert payload["default_ocr_engine"] == "rapid_ocr"
     assert "save_dir" not in payload
-    assert payload["sandbox_provider"] == "provisioner"
     assert "enable_reranker" not in payload
     assert "default_agent_id" not in payload
     # 快照只含公开配置字段，不夹带元数据
@@ -117,7 +171,6 @@ def test_refresh_loads_public_config_from_redis(tmp_path, monkeypatch: pytest.Mo
     payload = {
         "default_model": "test-provider:worker-chat",
         "save_dir": redis_save_dir,
-        "sandbox_virtual_path_prefix": "/redis/user-data",
         "default_ocr_engine": "mineru_ocr",
         "enable_reranker": True,
     }
@@ -131,7 +184,6 @@ def test_refresh_loads_public_config_from_redis(tmp_path, monkeypatch: pytest.Mo
     assert cfg.default_model == "test-provider:worker-chat"
     assert cfg.default_ocr_engine == "mineru_ocr"
     assert cfg.save_dir == str(tmp_path)
-    assert cfg.sandbox_virtual_path_prefix == "/redis/user-data"
     assert str(cfg._config_file) == str(tmp_path / "config" / "base.toml")
     # 快照里的非运行时字段和未知键不会被写回
     assert not hasattr(cfg, "enable_reranker")

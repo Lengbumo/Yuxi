@@ -779,3 +779,45 @@ async def test_mindmap_permissions(test_client, standard_user, knowledge_databas
         headers=standard_user["headers"],
     )
     _assert_forbidden_response(forbidden_generate)
+
+
+async def test_document_search_returns_empty_for_blank_query(test_client, admin_headers, knowledge_database):
+    """空关键词直接返回空结果，且不命中 /documents/{doc_id} 路由。"""
+    kb_id = knowledge_database["kb_id"]
+    response = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents/search",
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["files"] == []
+    assert payload["total"] == 0
+    assert payload["has_more"] is False
+
+
+async def test_document_search_returns_structure_for_query(test_client, admin_headers, knowledge_database):
+    """带关键词搜索返回标准结构，并验证路由声明顺序不被 /documents/{doc_id} 抢匹配。"""
+    kb_id = knowledge_database["kb_id"]
+    response = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents/search",
+        params={"query": "nonexistent-needle-xyz", "offset": 0, "limit": 50},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert isinstance(payload.get("files"), list)
+    assert payload["total"] == 0
+    assert payload["offset"] == 0
+    assert payload["limit"] == 50
+    assert payload["has_more"] is False
+
+
+async def test_document_search_requires_admin(test_client, standard_user, knowledge_database):
+    """普通用户不能访问管理端搜索接口。"""
+    kb_id = knowledge_database["kb_id"]
+    response = await test_client.get(
+        f"/api/knowledge/databases/{kb_id}/documents/search",
+        params={"query": "x"},
+        headers=standard_user["headers"],
+    )
+    _assert_forbidden_response(response)

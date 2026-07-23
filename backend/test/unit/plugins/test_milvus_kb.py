@@ -1,9 +1,11 @@
+import asyncio
+import threading
 import types
 
 import pytest
 from pymilvus import CollectionSchema, DataType, FieldSchema, Function, FunctionType
 
-from yuxi.knowledge.base import FileStatus
+from yuxi.knowledge.base import FileStatus, KnowledgeBase
 from yuxi.knowledge.chunking.ragflow_like.nlp import count_tokens
 from yuxi.knowledge.implementations.milvus import (
     CONTENT_ANALYZER_PARAMS,
@@ -110,6 +112,7 @@ class FakeKnowledgeFileRepository:
         return record
 
     async def update_fields(self, *, file_id: str, data: dict, kb_id: str | None = None):
+        await asyncio.sleep(0)
         record = self.records.get(file_id)
         if record is None or (kb_id and record.kb_id != kb_id):
             return None
@@ -150,6 +153,52 @@ def make_chunk(index: int, content: str = "content") -> dict:
         "chunk_index": index,
         "content": content,
     }
+
+
+async def test_delete_database_offloads_milvus_cleanup(monkeypatch):
+    kb = MilvusKB.__new__(MilvusKB)
+    kb.connection_alias = "test-alias"
+    event_loop_thread = threading.get_ident()
+    cleanup_threads = []
+    calls = []
+
+    def record_cleanup(name):
+        cleanup_threads.append(threading.get_ident())
+        calls.append(name)
+
+    monkeypatch.setattr(
+        "yuxi.knowledge.implementations.milvus.utility.has_collection",
+        lambda kb_id, using: record_cleanup("has_collection") or True,
+    )
+    monkeypatch.setattr(
+        "yuxi.knowledge.implementations.milvus.utility.drop_collection",
+        lambda kb_id, using: record_cleanup("drop_collection"),
+    )
+
+    class FakeGraphVectorStore:
+        def __init__(self):
+            record_cleanup("graph_init")
+
+        def drop_graph_collections(self, kb_id):
+            record_cleanup("drop_graph_collections")
+
+    monkeypatch.setattr(
+        "yuxi.knowledge.graphs.milvus_graph_vector_store.MilvusGraphVectorStore",
+        FakeGraphVectorStore,
+    )
+
+    async def delete_base(self, kb_id):
+        calls.append("delete_base")
+        return {"message": "删除成功"}
+
+    monkeypatch.setattr(KnowledgeBase, "delete_database", delete_base)
+
+    result = await kb.delete_database("db")
+
+    assert result == {"message": "删除成功"}
+    assert calls == ["has_collection", "drop_collection", "graph_init", "drop_graph_collections", "delete_base"]
+    assert cleanup_threads
+    assert all(thread_id != event_loop_thread for thread_id in cleanup_threads)
 
 
 def test_build_chunk_pg_records_preserves_extraction_result():
@@ -275,6 +324,63 @@ async def test_index_file_persists_chunk_stats(monkeypatch):
     assert refreshed_kbs == ["db"]
 
 
+async def test_parse_file_cancellation_marks_file_retryable(monkeypatch):
+    kb = MilvusKB.__new__(MilvusKB)
+    kb.databases_meta = {"db": {"metadata": {}}}
+    file_repo = FakeKnowledgeFileRepository(
+        {"file-1": make_file_record(markdown_file=None, status=FileStatus.UPLOADED)}
+    )
+    patch_file_repository(monkeypatch, file_repo)
+
+    parsing = asyncio.Event()
+
+    async def cancelled_parse(*args, **kwargs):
+        parsing.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("yuxi.knowledge.parser.unified.Parser.aparse", cancelled_parse)
+
+    task = asyncio.create_task(kb.parse_file("db", "file-1", operator_id="user-1"))
+    await asyncio.wait_for(parsing.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    record = file_repo.records["file-1"]
+    assert record.status == FileStatus.ERROR_PARSING
+    assert record.error_message == "File parsing was cancelled"
+
+
+async def test_index_file_cancellation_marks_file_retryable(monkeypatch):
+    kb = MilvusKB.__new__(MilvusKB)
+    kb.databases_meta = {"db": {"embedding_model_spec": "test-provider:test-embedding", "metadata": {}}}
+    file_repo = FakeKnowledgeFileRepository({"file-1": make_file_record()})
+    patch_file_repository(monkeypatch, file_repo)
+
+    async def get_collection(kb_id):
+        return FakeCollection()
+
+    reading = asyncio.Event()
+
+    async def cancelled_read(path):
+        reading.set()
+        await asyncio.Event().wait()
+
+    kb._get_milvus_collection = get_collection
+    kb._get_embedding_function = lambda embedding_model_spec: None
+    kb._read_markdown_from_minio = cancelled_read
+
+    task = asyncio.create_task(kb.index_file("db", "file-1", operator_id="user-1", params={}))
+    await asyncio.wait_for(reading.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    record = file_repo.records["file-1"]
+    assert record.status == FileStatus.ERROR_INDEXING
+    assert record.error_message == "File indexing was cancelled"
+
+
 async def test_delete_file_chunks_only_resets_file_stats(monkeypatch):
     repos = []
 
@@ -393,9 +499,7 @@ async def test_insert_chunks_to_stores_rolls_back_file_when_milvus_insert_fails(
 async def test_update_content_uses_streaming_chunk_store(monkeypatch):
     kb = MilvusKB.__new__(MilvusKB)
     kb.databases_meta = {"db": {"embedding_model_spec": "test-provider:test-embedding", "metadata": {}}}
-    file_repo = FakeKnowledgeFileRepository(
-        {"file-1": make_file_record(markdown_file=None, status=FileStatus.INDEXED)}
-    )
+    file_repo = FakeKnowledgeFileRepository({"file-1": make_file_record(markdown_file=None, status=FileStatus.INDEXED)})
     patch_file_repository(monkeypatch, file_repo)
     collection = FakeCollection()
     refreshed_kbs = []

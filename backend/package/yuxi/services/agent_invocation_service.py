@@ -19,13 +19,18 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from yuxi.agents.buildin import agent_manager
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
+from yuxi.repositories.agent_run_request_repository import AgentRunRequestRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
+from yuxi.services.agent_request_queue_service import (
+    finalize_intake,
+    intake_request,
+)
 from yuxi.services.agent_run_service import (
     AgentRunWaitTimeout,
     await_agent_run_result,
-    create_agent_run_view,
     get_agent_run_result,
     get_agent_run_view,
 )
@@ -57,6 +62,8 @@ async def create_agent_call_run_view(
     stream: bool,
     current_user: User,
     db: AsyncSession,
+    queue_policy: str | None = None,
+    tool_approval_mode: str | None = None,
 ) -> dict[str, Any]:
     """创建外部系统非流式 Agent 调用，并返回 Agent Call 响应结构。
 
@@ -73,6 +80,9 @@ async def create_agent_call_run_view(
     normalized_request_id = _normalize_agent_call_request_id(request_id)
     normalized_thread_id = str(requested_thread_id or "").strip()
     _validate_agent_call_meta(agent_call_meta or {})
+    resolved_queue_policy = str(queue_policy or ("enqueue" if async_mode else "reject")).strip()
+    if not async_mode and resolved_queue_policy != "reject":
+        raise HTTPException(status_code=422, detail="同步 agent-call 仅支持 queue_policy=reject")
 
     run_response = await create_agent_invocation_run_view(
         input_message=input_message,
@@ -81,11 +91,15 @@ async def create_agent_call_run_view(
         requested_thread_id=normalized_thread_id,
         request_id=normalized_request_id,
         model_spec=model_spec,
+        tool_approval_mode=tool_approval_mode,
         current_user=current_user,
         db=db,
         conversation_title="Agent Call Run",
+        queue_policy=resolved_queue_policy,
     )
     if async_mode:
+        if not run_response.get("run_id"):
+            return run_response
         return _build_agent_call_response(
             {
                 "run_id": run_response["run_id"],
@@ -96,6 +110,9 @@ async def create_agent_call_run_view(
                 "output": "",
             }
         )
+
+    if run_response["status"] == "rejected":
+        return run_response
 
     try:
         result = await await_agent_run_result(run_id=run_response["run_id"], current_uid=str(current_user.uid))
@@ -121,6 +138,7 @@ async def create_agent_eval_run_view(
     current_user: User,
     db: AsyncSession,
     include_trajectory_summary: bool = False,
+    tool_approval_mode: str | None = None,
 ) -> dict[str, Any]:
     """创建一次评估样例运行，并阻塞等待最终 AgentRun 结果。
 
@@ -142,10 +160,12 @@ async def create_agent_eval_run_view(
         requested_thread_id="",
         request_id=_normalize_agent_invocation_request_id(meta),
         model_spec=model_spec,
+        tool_approval_mode=tool_approval_mode,
         current_user=current_user,
         db=db,
         conversation_title="Agent Evaluation Run",
         attachment_file_ids=meta.get("attachment_file_ids") or [],
+        queue_policy="reject",
     )
     try:
         result = await await_agent_run_result(run_id=run_response["run_id"], current_uid=str(current_user.uid))
@@ -180,8 +200,10 @@ async def create_agent_invocation_run_view(
     db: AsyncSession,
     conversation_title: str,
     attachment_file_ids: list[str] | None = None,
+    queue_policy: str = "enqueue",
+    tool_approval_mode: str | None = None,
 ) -> dict[str, Any]:
-    """统一创建外部调用类 AgentRun，入口负责把请求解析成 input/meta。"""
+    """将外部调用转换为统一 AgentRunRequest intake。"""
     invocation_metadata = dict(invocation_metadata or {})
     if not str(invocation_metadata.get("source") or "").strip():
         raise HTTPException(status_code=422, detail="source 不能为空")
@@ -190,17 +212,38 @@ async def create_agent_invocation_run_view(
     if not agent_item:
         raise HTTPException(status_code=404, detail="智能体不存在")
 
+    existing_request = await AgentRunRequestRepository(db).get_by_request_id(request_id)
     existing_run = await AgentRunRepository(db).get_run_by_request_id(request_id)
-    if existing_run:
+    if existing_run and not existing_request:
         if existing_run.uid != str(current_user.uid):
             raise HTTPException(status_code=409, detail="request_id 冲突")
         if existing_run.agent_slug != agent_item.slug or existing_run.run_type != "chat":
             raise HTTPException(status_code=409, detail="request_id 冲突")
         if requested_thread_id and existing_run.conversation_thread_id != requested_thread_id:
             raise HTTPException(status_code=409, detail="request_id 冲突")
-        resolved_thread_id = existing_run.conversation_thread_id
-    else:
-        resolved_thread_id = requested_thread_id or str(uuid.uuid4())
+        return {
+            "request_id": request_id,
+            "status": existing_run.status,
+            "queue_policy": queue_policy,
+            "queue_position": 0,
+            "message_id": existing_run.input_message_id,
+            "run_id": existing_run.id,
+            "thread_id": existing_run.conversation_thread_id,
+            "request_events_url": None,
+        }
+
+    source = str(invocation_metadata["source"])
+    # uid/agent_slug/source/queue_policy 冲突由下方 intake_request 的既有请求校验统一兜底；
+    # thread 一旦命中既有请求就会被强制改写，此处必须提前拦截显式 thread 冲突。
+    if existing_request and requested_thread_id and existing_request.conversation_thread_id != requested_thread_id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "request_id_conflict", "message": "request_id 已用于其他请求作用域"},
+        )
+
+    resolved_thread_id = (
+        existing_request.conversation_thread_id if existing_request else requested_thread_id or str(uuid.uuid4())
+    )
 
     conv_repo = ConversationRepository(db)
     conversation = await conv_repo.get_conversation_by_thread_id(resolved_thread_id)
@@ -219,16 +262,42 @@ async def create_agent_invocation_run_view(
     }
     if attachment_file_ids:
         run_meta["attachment_file_ids"] = list(attachment_file_ids)
+    if tool_approval_mode is not None:
+        run_meta["tool_approval_mode"] = tool_approval_mode
 
-    return await create_agent_run_view(
-        input_message=input_message,
+    agent_backend = agent_manager.get_agent(agent_item.backend_id)
+    if not agent_backend:
+        raise HTTPException(status_code=404, detail=f"智能体后端 {agent_item.backend_id} 不存在")
+
+    intake = await intake_request(
+        db=db,
+        request_id=request_id,
+        uid=str(current_user.uid),
         agent_slug=agent_item.slug,
         thread_id=resolved_thread_id,
-        meta=run_meta,
-        current_uid=str(current_user.uid),
-        db=db,
+        source=source,
+        queue_policy=queue_policy,
+        input_message=input_message,
+        agent_item=agent_item,
+        agent_backend=agent_backend,
         model_spec=model_spec,
+        tool_approval_mode=tool_approval_mode,
+        meta=run_meta,
     )
+    await finalize_intake(db=db, intake=intake)
+
+    return {
+        "request_id": intake.request_id,
+        "status": intake.status,
+        "queue_policy": intake.queue_policy,
+        "queue_position": intake.queue_position,
+        "message_id": intake.message_id,
+        "run_id": intake.run_id,
+        "thread_id": intake.thread_id,
+        "request_events_url": (
+            f"/api/agent/requests/{intake.request_id}/events" if intake.status == "queued" else None
+        ),
+    }
 
 
 async def get_agent_call_run_result_view(
@@ -468,7 +537,9 @@ def _agent_call_finish_reason(status: str) -> str | None:
 
 
 def _build_agent_call_response(result: dict[str, Any]) -> dict[str, Any]:
-    status = str(result.get("status") or "unknown")
+    raw_status = str(result.get("status") or "unknown")
+    # agent-call 对外用 "pending" 表示 run 已派发但未结束；内部 queue 用 "dispatched"。
+    status = "pending" if raw_status == "dispatched" else raw_status
     output = result.get("output") if isinstance(result.get("output"), str) else ""
     usage = _normalize_agent_call_usage_metadata(result.get("usage"))
     payload: dict[str, Any] = {

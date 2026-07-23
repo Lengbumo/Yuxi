@@ -758,9 +758,14 @@ class MilvusKB(KnowledgeBase):
             await self.refresh_database_stats(kb_id)
             return result
 
-        except Exception as e:
-            logger.error(f"Indexing failed for {file_id}: {e}")
-            update_data = {"status": FileStatus.ERROR_INDEXING, "error_message": str(e)}
+        except (Exception, asyncio.CancelledError) as e:
+            if isinstance(e, asyncio.CancelledError):
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    current_task.uncancel()
+            error_msg = "File indexing was cancelled" if isinstance(e, asyncio.CancelledError) else str(e)
+            logger.error(f"Indexing failed for {file_id}: {error_msg}")
+            update_data = {"status": FileStatus.ERROR_INDEXING, "error_message": error_msg}
             if operator_id:
                 update_data["updated_by"] = operator_id
             await KnowledgeFileRepository().update_fields(file_id=file_id, kb_id=kb_id, data=update_data)
@@ -1301,24 +1306,27 @@ class MilvusKB(KnowledgeBase):
         content_info = await self._get_file_content_from_meta(file_id, file_meta)
         return {"meta": file_meta, **content_info}
 
-    def delete_database(self, kb_id: str) -> dict:
+    async def delete_database(self, kb_id: str) -> dict:
         """删除数据库，同时清除Milvus中的集合"""
-        # Drop Milvus collection
-        try:
-            if utility.has_collection(kb_id, using=self.connection_alias):
-                utility.drop_collection(kb_id, using=self.connection_alias)
-                logger.info(f"Dropped Milvus collection for {kb_id}")
-            else:
-                logger.info(f"Milvus collection {kb_id} does not exist, skipping")
-        except Exception as e:
-            logger.error(f"Failed to drop Milvus collection {kb_id}: {e}")
 
-        from yuxi.knowledge.graphs.milvus_graph_vector_store import MilvusGraphVectorStore
+        def delete_milvus_collections() -> None:
+            try:
+                if utility.has_collection(kb_id, using=self.connection_alias):
+                    utility.drop_collection(kb_id, using=self.connection_alias)
+                    logger.info(f"Dropped Milvus collection for {kb_id}")
+                else:
+                    logger.info(f"Milvus collection {kb_id} does not exist, skipping")
+            except Exception as e:
+                logger.error(f"Failed to drop Milvus collection {kb_id}: {e}")
 
-        MilvusGraphVectorStore().drop_graph_collections(kb_id)
+            from yuxi.knowledge.graphs.milvus_graph_vector_store import MilvusGraphVectorStore
+
+            MilvusGraphVectorStore().drop_graph_collections(kb_id)
+
+        await asyncio.to_thread(delete_milvus_collections)
 
         # Call base method to delete local files and metadata
-        return super().delete_database(kb_id)
+        return await super().delete_database(kb_id)
 
     def get_query_params_config(self, kb_id: str, **kwargs) -> dict:
         """获取 Milvus 知识库的查询参数配置"""

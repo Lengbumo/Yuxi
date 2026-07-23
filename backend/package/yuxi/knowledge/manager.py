@@ -4,6 +4,7 @@ import os
 from yuxi.knowledge.base import KBNotFoundError, KnowledgeBase
 from yuxi.knowledge.chunking.ragflow_like.presets import deep_merge
 from yuxi.knowledge.factory import KnowledgeBaseFactory
+from yuxi.knowledge.schemas import FindOutputSchema, OpenOutputSchema
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import utc_isoformat
@@ -11,6 +12,7 @@ from yuxi.utils.share_config import SHARE_ACCESS_LEVELS, normalize_share_config
 
 DEFAULT_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "user_uids": []}
 ACCESS_LEVELS = SHARE_ACCESS_LEVELS
+KB_FILE_SEARCH_SCAN_LIMIT = 5000
 
 
 class KnowledgeBaseManager:
@@ -261,6 +263,32 @@ class KnowledgeBaseManager:
                 "share_config": kb.share_config,
             },
         )
+
+    async def get_accessible_database_info_by_uid(self, uid: str, kb_id: str) -> dict | None:
+        """按 uid 获取一个可访问知识库的信息，找不到或无权访问时返回 None。"""
+        normalized_kb_id = str(kb_id or "").strip()
+        if not normalized_kb_id:
+            return None
+
+        databases = await self.get_databases_by_uid(uid)
+        for database in databases.get("databases", []):
+            if str(database.get("kb_id") or "") == normalized_kb_id:
+                return database
+        return None
+
+    def database_type_supports_documents(self, kb_type: str | None) -> bool:
+        """判断知识库类型是否支持文档全文操作。"""
+        normalized_type = (kb_type or "milvus").lower()
+        if not KnowledgeBaseFactory.is_type_supported(normalized_type):
+            return False
+        return KnowledgeBaseFactory.get_kb_class(normalized_type).supports_documents
+
+    async def get_database_document_support(self, kb_id: str) -> tuple[dict | None, bool]:
+        """返回知识库信息及其是否支持文档全文操作。"""
+        db_info = await self.get_database_info(kb_id)
+        if not db_info:
+            return None, False
+        return db_info, self.database_type_supports_documents(db_info.get("kb_type"))
 
     async def get_databases_by_uid(self, uid: str) -> dict:
         """根据 uid 获取知识库列表"""
@@ -615,6 +643,111 @@ class KnowledgeBaseManager:
             result["stats"] = stats
         return result
 
+    async def search_document_files(
+        self,
+        knowledge_bases: list[dict],
+        *,
+        query: str | None = None,
+        offset: int = 0,
+        limit: int = 300,
+        status: str | None = None,
+        include_is_folder: bool = False,
+        include_parent_id: bool = False,
+    ) -> dict:
+        """按文件名在一组知识库中搜索文件，并返回分页结果。"""
+        from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+
+        normalized_offset = max(offset or 0, 0)
+        normalized_limit = min(max(limit or 300, 1), KB_FILE_SEARCH_SCAN_LIMIT)
+        normalized_query = (query or "").strip().lower()
+        accepted_statuses = self._normalize_file_status_filter(status)
+
+        repo = KnowledgeFileRepository()
+        all_files = []
+        use_sql_pagination = len(knowledge_bases) == 1
+        candidate_limit = normalized_limit if use_sql_pagination else normalized_offset + normalized_limit
+        query_offset = normalized_offset if use_sql_pagination else 0
+        search_results = await asyncio.gather(
+            *(
+                self._search_kb_files(
+                    repo,
+                    kb,
+                    query=normalized_query,
+                    statuses=accepted_statuses,
+                    offset=query_offset,
+                    limit=candidate_limit,
+                )
+                for kb in knowledge_bases
+            )
+        )
+        total = 0
+        for kb, files, kb_total in search_results:
+            total += kb_total
+            kb_id = kb.get("kb_id")
+            for file in files:
+                item = {
+                    "kb_id": kb_id,
+                    "kb_name": kb.get("name"),
+                    "file_id": file.file_id,
+                    "filename": file.filename,
+                    "file_type": file.file_type,
+                    "status": file.status,
+                    "created_at": str(file.created_at) if file.created_at else None,
+                    "updated_at": str(file.updated_at) if file.updated_at else None,
+                    "file_size": file.file_size,
+                }
+                if include_is_folder:
+                    item["is_folder"] = bool(file.is_folder)
+                if include_parent_id:
+                    item["parent_id"] = file.parent_id
+                all_files.append(item)
+
+        if not use_sql_pagination:
+            # 多库才需要跨库按更新时间归并；单库结果已由 DB 按 updated_at desc, file_id asc 排好序。
+            all_files.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+        paginated_files = (
+            all_files if use_sql_pagination else all_files[normalized_offset : normalized_offset + normalized_limit]
+        )
+        return {
+            "files": paginated_files,
+            "total": total,
+            "offset": normalized_offset,
+            "limit": normalized_limit,
+            "has_more": normalized_offset + normalized_limit < total,
+        }
+
+    @staticmethod
+    def _normalize_file_status_filter(status: str | None) -> set[str] | None:
+        if not status or status == "all":
+            return None
+        return {
+            "indexed": {"indexed", "done"},
+            "error_indexing": {"error_indexing", "failed"},
+        }.get(status, {status})
+
+    @staticmethod
+    async def _search_kb_files(
+        repo,
+        kb: dict,
+        *,
+        query: str | None,
+        statuses: set[str] | None,
+        offset: int,
+        limit: int,
+    ) -> tuple[dict, list, int]:
+        """搜索单个知识库文件，kb_id 缺失时返回空列表，供并行 gather 使用。"""
+        if not kb.get("kb_id"):
+            return kb, [], 0
+        files, total = await repo.search_files(
+            kb_id=kb["kb_id"],
+            filename_query=query,
+            statuses=statuses,
+            offset=offset,
+            limit=limit,
+            files_only=True,
+        )
+        return kb, files, total
+
     async def document_file_exists(self, kb_id: str, filename: str) -> bool:
         """检查指定知识库中是否存在给定展示文件名或相对路径的文件。"""
         from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
@@ -719,6 +852,7 @@ class KnowledgeBaseManager:
         return await kb_instance.read_file_preview(kb_id, file_id)
 
     async def get_file_download(self, kb_id: str, file_id: str, variant: str = "original") -> dict:
+        await self._require_kb_supports_documents(kb_id, "download")
         kb_instance = await self._get_kb_for_database(kb_id)
         return await kb_instance.get_file_download(kb_id, file_id, variant)
 
@@ -835,6 +969,74 @@ class KnowledgeBaseManager:
             all_retrievers.update(retrievers)
 
         return all_retrievers
+
+    async def retrieve(self, kb_id: str, query: str, **options) -> dict:
+        """对已注册 retriever 的知识库执行检索。
+
+        可见性由调用方保证；retriever 未注册抛 KBNotFoundError。
+        retriever 内部已 build_search_output，直接返回。
+        """
+        target_info = self.get_retrievers().get(kb_id)
+        if target_info is None:
+            raise KBNotFoundError(f"知识库资源 '{kb_id}' 不存在")
+        return await target_info["retriever"](query, **options)
+
+    async def open_document(
+        self,
+        kb_id: str,
+        file_id: str,
+        *,
+        offset: int = 0,
+        limit: int = 200,
+    ) -> dict:
+        """按行窗口打开文件解析后的 Markdown 内容，返回 OpenOutputSchema 字典。
+
+        不支持文档全文操作的知识库（如 dify 只读源）抛 ValueError。
+        """
+        await self._require_kb_supports_documents(kb_id, "open")
+        window = await self.open_file_content(kb_id, file_id, offset=offset, limit=limit)
+        return OpenOutputSchema(kb_id=kb_id, file_id=file_id, **window).model_dump()
+
+    async def find_in_document(
+        self,
+        kb_id: str,
+        file_id: str,
+        patterns: list[str],
+        *,
+        use_regex: bool = False,
+        case_sensitive: bool = False,
+        max_windows: int = 5,
+        window_size: int = 80,
+    ) -> dict:
+        """在文件内做关键词或正则定位，返回 FindOutputSchema 字典。
+
+        不支持文档全文操作的知识库（如 dify 只读源）抛 ValueError。
+        """
+        await self._require_kb_supports_documents(kb_id, "find")
+        result = await self.find_file_content(
+            kb_id,
+            file_id,
+            patterns,
+            use_regex=use_regex,
+            case_sensitive=case_sensitive,
+            max_windows=max_windows,
+            window_size=window_size,
+        )
+        return FindOutputSchema(kb_id=kb_id, file_id=file_id, **result).model_dump()
+
+    async def _require_kb_supports_documents(self, kb_id: str, operation: str) -> None:
+        """按数据库元数据判断是否支持文档全文操作；不支持抛 ValueError。"""
+        db_info, supports_documents = await self.get_database_document_support(kb_id)
+        if not db_info:
+            raise KBNotFoundError(f"知识库资源 '{kb_id}' 不存在")
+        kb_type = str(db_info.get("kb_type") or "").lower()
+        if not supports_documents:
+            operation_label = {
+                "open": "文档查看",
+                "find": "文档查找",
+                "download": "文件下载",
+            }.get(operation, operation)
+            raise ValueError(f"{db_info.get('name') or kb_type} 只支持检索，不支持{operation_label}")
 
     # =============================================================================
     # 管理器特有的方法

@@ -114,6 +114,13 @@ export const documentApi = {
     return apiAdminGet(`/api/knowledge/databases/${kbId}/documents${query ? `?${query}` : ''}`)
   },
 
+  searchDocuments: async (kbId, params = {}) => {
+    const query = buildQuery(params)
+    return apiAdminGet(
+      `/api/knowledge/databases/${kbId}/documents/search${query ? `?${query}` : ''}`
+    )
+  },
+
   /**
    * 检查知识库中是否存在指定文件名或相对路径
    * @param {string} kbId - 知识库ID
@@ -580,6 +587,10 @@ export const evaluationApi = {
 
   generateDataset: async (kbId, params) => {
     return apiAdminPost(`/api/evaluation/databases/${kbId}/datasets/generate`, params)
+  },
+
+  resumeDatasetGeneration: async (kbId, datasetId) => {
+    return apiAdminPost(`/api/evaluation/databases/${kbId}/datasets/${datasetId}/resume`, {})
   },
 
   runEvaluation: async (kbId, params) => {

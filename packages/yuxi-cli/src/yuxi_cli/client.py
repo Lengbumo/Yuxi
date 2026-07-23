@@ -108,6 +108,67 @@ class YuxiClient:
             json={"items": items, "params": params},
         )
 
+    def list_external_databases(self) -> dict:
+        return self._request("GET", "/knowledge/databases/external")
+
+    def list_external_files(
+        self,
+        kb_id: str,
+        *,
+        query: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
+        status: str = "all",
+    ) -> dict:
+        params: dict[str, Any] = {"offset": offset, "limit": limit, "status": status}
+        if query:
+            params["query"] = query
+        return self._request("GET", f"/knowledge/databases/external/{kb_id}/files", params=params)
+
+    def retrieve_external(
+        self,
+        kb_id: str,
+        *,
+        query: str,
+        file_name: str | None = None,
+        options: dict | None = None,
+    ) -> dict:
+        return self._request(
+            "POST",
+            f"/knowledge/databases/external/{kb_id}/retrieve",
+            json={"query": query, "file_name": file_name, "options": options or {}},
+        )
+
+    def open_external_file(self, kb_id: str, file_id: str, *, offset: int = 0, limit: int = 200) -> dict:
+        return self._request(
+            "GET",
+            f"/knowledge/databases/external/{kb_id}/files/{file_id}/open",
+            params={"offset": offset, "limit": limit},
+        )
+
+    def find_external_file(
+        self,
+        kb_id: str,
+        file_id: str,
+        *,
+        patterns: list[str],
+        use_regex: bool = False,
+        case_sensitive: bool = False,
+        max_windows: int = 5,
+        window_size: int = 80,
+    ) -> dict:
+        return self._request(
+            "POST",
+            f"/knowledge/databases/external/{kb_id}/files/{file_id}/find",
+            json={
+                "patterns": patterns,
+                "use_regex": use_regex,
+                "case_sensitive": case_sensitive,
+                "max_windows": max_windows,
+                "window_size": window_size,
+            },
+        )
+
     def run_agent_eval(
         self,
         *,

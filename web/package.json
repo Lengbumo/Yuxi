@@ -1,6 +1,6 @@
 {
   "name": "yuxi-web",
-  "version": "0.7.1.beta1",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "server": "vite serve --host",
     "server:prod": "vite serve --host --port 8080",
     "build": "vite build",
+    "test:unit": "node --test test/unit/*.test.js",
     "preview": "vite preview",
     "lint": "eslint . --fix --cache",
     "format": "prettier --write --experimental-cli src/"
@@ -15,6 +16,7 @@
   "dependencies": {
     "@ant-design/icons-vue": "^7.0.1",
     "@antv/g6": "^5.1.1",
+    "@opencode-ai/models": "0.0.15",
     "@sigma/edge-curve": "^3.1.0",
     "@sigma/node-border": "^3.0.0",
     "@vscode/markdown-it-katex": "^1.1.2",

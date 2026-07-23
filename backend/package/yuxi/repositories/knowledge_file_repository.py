@@ -101,6 +101,42 @@ class KnowledgeFileRepository:
             )
             return list(result.scalars().all())
 
+    async def search_files(
+        self,
+        *,
+        kb_id: str,
+        filename_query: str | None = None,
+        statuses: set[str] | None = None,
+        offset: int = 0,
+        limit: int = 100,
+        files_only: bool = True,
+    ) -> tuple[list[KnowledgeFile], int]:
+        filters = [KnowledgeFile.kb_id == kb_id]
+        if files_only:
+            filters.append(KnowledgeFile.is_folder.is_(False))
+        if statuses is not None:
+            filters.append(KnowledgeFile.status.in_(statuses))
+
+        normalized_query = (filename_query or "").strip().lower()
+        if normalized_query:
+            escaped_query = normalized_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            filters.append(func.lower(KnowledgeFile.filename).like(f"%{escaped_query}%", escape="\\"))
+
+        normalized_offset = max(int(offset or 0), 0)
+        normalized_limit = min(max(int(limit or 100), 1), 10_000)
+
+        async with pg_manager.get_async_session_context() as session:
+            total_result = await session.execute(select(func.count()).select_from(KnowledgeFile).where(*filters))
+            total = int(total_result.scalar_one() or 0)
+            result = await session.execute(
+                select(KnowledgeFile)
+                .where(*filters)
+                .order_by(KnowledgeFile.updated_at.desc(), KnowledgeFile.file_id.asc())
+                .offset(normalized_offset)
+                .limit(normalized_limit)
+            )
+            return list(result.scalars().all()), total
+
     async def get_filenames_by_file_ids(self, *, kb_id: str, file_ids: list[str]) -> dict[str, str]:
         normalized_ids = [file_id for file_id in file_ids if file_id]
         if not normalized_ids:

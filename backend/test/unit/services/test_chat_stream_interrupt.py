@@ -10,13 +10,51 @@ import pytest
 sys.path.insert(0, os.getcwd())
 
 from yuxi.services.chat_service import (
-    _normalize_interrupt_questions,
     _build_ask_user_question_payload,
+    _build_tool_approval_payload,
     _coerce_interrupt_payload,
+    _normalize_interrupt_questions,
     stream_agent_resume,
 )
 from yuxi.services import chat_service as svc
 from yuxi.utils.question_utils import normalize_options
+
+
+class _FakeSession:
+    def __init__(self):
+        self.commit_count = 0
+
+    async def commit(self):
+        self.commit_count += 1
+
+def test_build_tool_approval_payload_preserves_actions_and_review_configs():
+    payload = _build_tool_approval_payload(
+        {
+            "action_requests": [
+                {"name": "execute", "args": {"command": "pytest -q"}, "description": "approval"}
+            ],
+            "review_configs": [
+                {"action_name": "execute", "allowed_decisions": ["approve", "reject"]}
+            ],
+        },
+        "thread-1",
+    )
+
+    assert payload == {
+        "approval": {
+            "action_requests": [
+                {"name": "execute", "args": {"command": "pytest -q"}, "description": "approval"}
+            ],
+            "review_configs": [
+                {"action_name": "execute", "allowed_decisions": ["approve", "reject"]}
+            ],
+        },
+        "thread_id": "thread-1",
+    }
+
+
+def test_build_tool_approval_payload_rejects_mismatched_lists():
+    assert _build_tool_approval_payload({"action_requests": [{}], "review_configs": []}, "thread-1") is None
 
 
 class TestNormalizeInterruptOptions:
@@ -198,7 +236,9 @@ async def test_stream_agent_resume_init_does_not_render_resume_input():
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_resume_routes_subagent_chunks(monkeypatch):
+async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chunks(monkeypatch):
+    db = _FakeSession()
+
     class FakeContext:
         def __init__(self):
             self.thread_id = None
@@ -215,6 +255,7 @@ async def test_stream_agent_resume_routes_subagent_chunks(monkeypatch):
         context_schema = FakeContext
 
         async def stream_resume_with_state(self, resume_command, input_context=None, **kwargs):
+            assert db.commit_count == 1
             yield (
                 "messages",
                 (
@@ -260,7 +301,7 @@ async def test_stream_agent_resume_routes_subagent_chunks(monkeypatch):
         resume_input={"ok": True},
         meta={"request_id": "req-1"},
         current_user=SimpleNamespace(uid="user-1"),
-        db=object(),
+        db=db,
     )
 
     chunks = []

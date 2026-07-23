@@ -1,6 +1,7 @@
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 from fastapi import HTTPException, UploadFile
@@ -12,12 +13,13 @@ from yuxi.agents.backends.sandbox import (
 )
 from yuxi.agents.buildin import agent_manager
 from yuxi.config import config as app_config
-from yuxi.knowledge.parser import DocumentProcessorFactory, Parser
+from yuxi.knowledge.parser.factory import DocumentProcessorFactory
+from yuxi.knowledge.parser.unified import Parser
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES, ConversationRepository
 from yuxi.services.mention_search_service import invalidate_mention_cache
 from yuxi.storage.minio import StorageError, get_minio_client
-from yuxi.storage.postgres.models_business import User
+from yuxi.storage.postgres.models_business import AgentRun, User
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_isoformat
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import VIRTUAL_PATH_UPLOADS
@@ -206,7 +208,11 @@ def _normalize_parse_method(file_name: str, parse_method: str | None) -> str:
     if suffix not in TMP_ATTACHMENT_PARSE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="当前仅支持 PDF 和图片附件解析")
 
-    method = parse_method or ("rapid_ocr" if suffix in TMP_ATTACHMENT_IMAGE_EXTENSIONS else "disable")
+    if suffix in TMP_ATTACHMENT_IMAGE_EXTENSIONS:
+        default_engine = app_config.default_ocr_engine
+        method = parse_method or ("rapid_ocr" if default_engine == "disable" else default_engine)
+    else:
+        method = parse_method or "disable"
     if suffix in TMP_ATTACHMENT_IMAGE_EXTENSIONS:
         allowed_methods = TMP_ATTACHMENT_OCR_METHODS
     else:
@@ -916,6 +922,29 @@ async def get_thread_history_view(
         raise HTTPException(status_code=404, detail="对话线程不存在")
 
     messages = await conv_repo.get_messages_by_thread_id(thread_id)
+    messages = [
+        message
+        for message in messages
+        if not (message.role == "user" and message.delivery_status in {"queued", "cancelled", "rejected"})
+    ]
+
+    run_ids_in_messages = {msg.run_id for msg in messages if msg.run_id}
+    run_created_at: dict[str, Any] = {}
+    if run_ids_in_messages:
+        run_result = await db.execute(
+            select(AgentRun.id, AgentRun.created_at)
+            .where(AgentRun.id.in_(run_ids_in_messages))
+            .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
+        )
+        run_created_at = {run_id: created_at for run_id, created_at in run_result.all()}
+    messages.sort(
+        key=lambda message: (
+            run_created_at.get(message.run_id) or message.created_at,
+            0 if message.role == "user" else 1,
+            message.created_at,
+            message.id,
+        )
+    )
     message_request_ids = set()
     for msg in messages:
         request_id = (msg.extra_metadata or {}).get("request_id")

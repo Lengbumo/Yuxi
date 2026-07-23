@@ -173,8 +173,8 @@ def test_builtin_siliconflow_provider_includes_default_runnable_models():
     assert "base_url_override" not in models["Pro/BAAI/bge-reranker-v2-m3"]
 
 
-def test_builtin_dashscope_provider_includes_default_embedding_and_rerank_models():
-    provider = next(item for item in BUILTIN_PROVIDERS if item["provider_id"] == "alibaba")
+def test_builtin_dashscope_cn_provider_includes_default_embedding_and_rerank_models():
+    provider = next(item for item in BUILTIN_PROVIDERS if item["provider_id"] == "alibaba-cn")
     models = {model["id"]: model for model in provider["enabled_models"]}
 
     assert provider["capabilities"] == ["chat", "embedding", "rerank"]
@@ -185,6 +185,16 @@ def test_builtin_dashscope_provider_includes_default_embedding_and_rerank_models
     assert models["text-embedding-v4"]["type"] == "embedding"
     assert models["text-embedding-v4"]["dimension"] == 1024
     assert models["qwen3-rerank"]["type"] == "rerank"
+
+
+def test_builtin_dashscope_international_provider_uses_international_endpoint():
+    provider = next(item for item in BUILTIN_PROVIDERS if item["provider_id"] == "alibaba")
+
+    assert provider["display_name"] == "DashScope (International)"
+    assert provider["base_url"] == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    assert provider["models_endpoint"] == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models"
+    assert "embedding_base_url" not in provider
+    assert "rerank_base_url" not in provider
 
 
 def testcheck_credential_status_disabled_provider_always_ok():

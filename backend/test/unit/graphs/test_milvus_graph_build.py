@@ -235,6 +235,28 @@ def test_milvus_graph_service_writes_chunk_entity_and_relation():
     assert entity_call.kwargs["attributes"] == '[{"text": "工程师", "label": "Occupation"}]'
 
 
+def test_milvus_graph_service_delete_file_graph_uses_scoped_streaming_queries():
+    tx = MagicMock()
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.execute_write.side_effect = lambda func: func(tx)
+    driver = MagicMock()
+    driver.session.return_value = session
+    service = MilvusGraphService(neo4j_connection=SimpleNamespace(driver=driver))
+
+    service._delete_file_graph_from_neo4j("kb_test", "file_1")
+
+    queries = [call.args[0] for call in tx.run.call_args_list]
+    assert len(queries) == 3
+    cleanup_query = queries[1]
+    assert "file_id: $file_id" in cleanup_query
+    assert "DELETE m" in cleanup_query
+    assert "WITH DISTINCT e" in cleanup_query
+    assert "collect(" not in cleanup_query
+    assert "MATCH (e:Entity:MilvusKB:`kb_test` {kb_id: $kb_id})" not in cleanup_query
+    assert "DETACH DELETE c" in queries[2]
+
+
 def test_milvus_graph_service_process_query_result_keeps_complete_edges():
     service = MilvusGraphService()
     result = service._process_query_result(
@@ -305,6 +327,82 @@ def test_milvus_graph_service_process_query_result_clamps_negative_limit():
     )
 
     assert result == {"nodes": [], "edges": []}
+
+
+@pytest.mark.parametrize("max_depth", [1, 2, 3])
+def test_milvus_graph_service_build_query_uses_requested_depth(max_depth):
+    service = MilvusGraphService()
+
+    query = service._build_query("kb_test", "entity", limit=20, max_depth=max_depth)
+
+    assert f"[*1..{max_depth}]" in query
+    assert "nodes(path)" in query
+    assert "relationships(path)" in query
+    assert "nodes(path)) + seeds AS nodes" in query
+
+
+def test_milvus_graph_service_build_query_excludes_chunks_from_entire_path():
+    service = MilvusGraphService()
+
+    query = service._build_query("kb_test", "entity", limit=20, max_depth=3, exclude_chunk=True)
+
+    assert "NOT n:Chunk" in query
+    assert "NOT path_node:Chunk" in query
+
+
+def test_milvus_graph_service_query_nodes_sync_returns_complete_multi_hop_path():
+    query_result = MagicMock()
+    query_result.single.return_value = {
+        "nodes": [_raw_graph_node("node-a"), _raw_graph_node("node-b"), _raw_graph_node("node-c")],
+        "edges": [
+            _raw_graph_edge("edge-a-b", "node-a", "node-b"),
+            _raw_graph_edge("edge-b-c", "node-b", "node-c"),
+        ],
+    }
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.run.return_value = query_result
+    driver = MagicMock()
+    driver.session.return_value = session
+    service = MilvusGraphService(neo4j_connection=SimpleNamespace(driver=driver))
+
+    result = service._query_nodes_sync(
+        "kb_test",
+        "kb_test",
+        "node-a",
+        limit=3,
+        max_depth=2,
+        exclude_chunk=False,
+    )
+
+    assert [node["id"] for node in result["nodes"]] == ["node-a", "node-b", "node-c"]
+    assert [edge["id"] for edge in result["edges"]] == ["edge-a-b", "edge-b-c"]
+    query, query_params = session.run.call_args
+    assert "[*1..2]" in query[0]
+    assert query_params["path_limit"] == 30
+
+
+def test_milvus_graph_service_query_nodes_sync_caps_max_depth():
+    query_result = MagicMock()
+    query_result.single.return_value = None
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.run.return_value = query_result
+    driver = MagicMock()
+    driver.session.return_value = session
+    service = MilvusGraphService(neo4j_connection=SimpleNamespace(driver=driver))
+
+    service._query_nodes_sync(
+        "kb_test",
+        "kb_test",
+        "node-a",
+        limit=3,
+        max_depth=100,
+        exclude_chunk=False,
+    )
+
+    query, _ = session.run.call_args
+    assert "[*1..3]" in query[0]
 
 
 @pytest.mark.asyncio

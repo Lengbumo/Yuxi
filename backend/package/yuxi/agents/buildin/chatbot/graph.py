@@ -14,12 +14,14 @@ from yuxi.agents.context import (
     prepare_agent_runtime_context,
 )
 from yuxi.agents.middlewares import (
+    ImageInputCompatibilityMiddleware,
     TokenUsageMiddleware,
     create_summary_middleware,
     save_attachments_to_fs,
 )
 from yuxi.agents.middlewares.skills import SkillsMiddleware
 from yuxi.agents.middlewares.subagent_task import create_subagent_task_middleware
+from yuxi.agents.tool_approval import create_tool_approval_middleware, normalize_tool_approval_mode
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
 
 from .context import ChatBotContext
@@ -68,9 +70,15 @@ async def _build_middlewares(context):
             TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
             PatchToolCallsMiddleware(),
             ModelRetryMiddleware(max_retries=getattr(context, "model_retry_times", 2)),
+            ImageInputCompatibilityMiddleware(),
             TokenUsageMiddleware(),
         ]
     )
+    approval_middleware = create_tool_approval_middleware(
+        normalize_tool_approval_mode(getattr(context, "tool_approval_mode", "default"))
+    )
+    if approval_middleware:
+        middlewares.append(approval_middleware)
     return middlewares
 
 

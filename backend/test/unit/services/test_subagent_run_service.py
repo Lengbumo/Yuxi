@@ -153,6 +153,9 @@ def _patch_repos(
                 return existing_child_conversation
             return None
 
+        async def lock_conversation_by_thread_id(self, thread_id: str):
+            return await self.get_conversation_by_thread_id(thread_id)
+
         async def add_conversation(
             self,
             *,
@@ -227,6 +230,9 @@ def _patch_run_record_creation(
         async def get_conversation_by_thread_id(self, thread_id: str):
             del thread_id
             return SimpleNamespace(id=20, uid="user-1", status="subagent", agent_id="worker")
+
+        async def lock_conversation_by_thread_id(self, thread_id: str):
+            return await self.get_conversation_by_thread_id(thread_id)
 
     class AgentRepo:
         def __init__(self, db_session):
@@ -549,7 +555,12 @@ async def test_subagent_run_service_translates_busy_run(monkeypatch: pytest.Monk
 async def test_subagent_run_service_create_run_record_persists_subagent_context(monkeypatch: pytest.MonkeyPatch):
     db = _FakeDB()
     _patch_run_record_creation(monkeypatch, db)
-    creator_run = SimpleNamespace(id="parent-run", conversation_id=10, conversation_thread_id="parent-thread")
+    creator_run = SimpleNamespace(
+        id="parent-run",
+        conversation_id=10,
+        conversation_thread_id="parent-thread",
+        input_payload={"tool_approval_mode": "default"},
+    )
     relation = _relation(child_thread_id="child-thread", parent_conversation_id=10, subagent_slug="worker")
 
     run, created = await SubagentRunService(db)._create_run_record(
@@ -576,6 +587,7 @@ async def test_subagent_run_service_create_run_record_persists_subagent_context(
     assert db.created_run_kwargs["input_message_id"] == 10
     assert db.created_run_kwargs["input_payload"] == {
         "model_spec": "agent-default-model",
+        "tool_approval_mode": "default",
         "runtime": {
             "tool_call_id": "tool-1",
             "subagent_name": "Worker",
@@ -593,7 +605,12 @@ async def test_subagent_run_service_create_run_record_uses_creator_thread_when_f
 ):
     db = _FakeDB()
     _patch_run_record_creation(monkeypatch, db)
-    creator_run = SimpleNamespace(id="parent-run", conversation_id=10, conversation_thread_id="current-parent-thread")
+    creator_run = SimpleNamespace(
+        id="parent-run",
+        conversation_id=10,
+        conversation_thread_id="current-parent-thread",
+        input_payload={"tool_approval_mode": "always_trust"},
+    )
     relation = _relation(child_thread_id="child-thread", parent_conversation_id=10, subagent_slug="worker")
 
     await SubagentRunService(db)._create_run_record(
@@ -610,6 +627,7 @@ async def test_subagent_run_service_create_run_record_uses_creator_thread_when_f
     assert db.created_run_kwargs["created_by_run_id"] == "parent-run"
     assert db.created_run_kwargs["input_payload"]["runtime"]["parent_thread_id"] == "current-parent-thread"
     assert db.created_run_kwargs["input_payload"]["runtime"]["file_thread_id"] == "current-parent-thread"
+    assert db.created_run_kwargs["input_payload"]["tool_approval_mode"] == "always_trust"
 
 
 @pytest.mark.asyncio

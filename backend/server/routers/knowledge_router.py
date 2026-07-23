@@ -9,11 +9,12 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
-from yuxi import config, knowledge_base
+from yuxi import config
 from yuxi.knowledge.chunking.ragflow_like.presets import get_chunk_preset_options
 from yuxi.knowledge.factory import KnowledgeBaseFactory
 from yuxi.knowledge.graphs.milvus_graph_service import GRAPH_TASK_TYPE, MilvusGraphService
-from yuxi.knowledge.parser import SUPPORTED_FILE_EXTENSIONS, Parser, is_supported_file_extension
+from yuxi.knowledge.parser.unified import SUPPORTED_FILE_EXTENSIONS, Parser, is_supported_file_extension
+from yuxi.knowledge.runtime import knowledge_base
 from yuxi.knowledge.utils import calculate_content_hash, is_minio_url, parse_minio_url
 from yuxi.knowledge.utils.mindmap_utils import (
     batch_remove_files_from_mindmap,
@@ -129,14 +130,14 @@ async def _delete_document_storage_objects(kb_id: str, doc_id: str, file_path: s
         logger.warning(f"从MinIO删除预览 PDF 失败: {minio_error}")
 
 
-async def _ensure_database_supports_documents(kb_id: str, operation: str) -> None:
-    db_info = await knowledge_base.get_database_info(kb_id)
+async def _ensure_database_supports_documents(kb_id: str, operation: str) -> dict:
+    db_info, supports_documents = await knowledge_base.get_database_document_support(kb_id)
     if not db_info:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
     kb_type = (db_info.get("kb_type") or "").lower()
-    kb_class = KnowledgeBaseFactory.get_kb_class(kb_type)
-    if not kb_class.supports_documents:
+    if not supports_documents:
         raise HTTPException(status_code=400, detail=f"{db_info.get('name') or kb_type} 只支持检索，不支持{operation}")
+    return db_info
 
 
 def _ensure_document_params(params: dict | None) -> dict:
@@ -299,9 +300,7 @@ async def get_accessible_databases(current_user: User = Depends(get_required_use
                 "description": db.get("description", ""),
                 "created_by": db.get("created_by"),
                 "kb_type": db.get("kb_type"),
-                "supports_documents": KnowledgeBaseFactory.get_kb_class(
-                    (db.get("kb_type") or "milvus").lower()
-                ).supports_documents,
+                "supports_documents": knowledge_base.database_type_supports_documents(db.get("kb_type")),
             }
             for db in databases.get("databases", [])
         ]
@@ -637,6 +636,33 @@ async def list_documents(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@knowledge.get("/databases/{kb_id}/documents/search")
+async def search_documents(
+    kb_id: str,
+    query: str = Query("", description="文件名关键词，仅匹配文件名不匹配内容"),
+    offset: int = Query(0, ge=0, description="偏移量，从 0 开始"),
+    limit: int = Query(100, ge=1, le=500, description="每页数量"),
+    current_user: User = Depends(get_admin_user),
+):
+    """按文件名搜索知识库文件（仅匹配文件名，不搜索文件内容）。"""
+    database = await knowledge_base.get_accessible_database_info_by_uid(current_user.uid, kb_id)
+    if not database:
+        raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在或无权访问")
+    if not knowledge_base.database_type_supports_documents(database.get("kb_type")):
+        kb_type = (database.get("kb_type") or "").lower()
+        raise HTTPException(status_code=400, detail=f"{database.get('name') or kb_type} 只支持检索，不支持文档搜索")
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        return {"files": [], "total": 0, "offset": 0, "limit": limit, "has_more": False}
+    return await knowledge_base.search_document_files(
+        [database],
+        query=normalized_query,
+        offset=offset,
+        limit=limit,
+        include_parent_id=True,
+    )
 
 
 @knowledge.get("/databases/{kb_id}/documents/exists")
@@ -1136,12 +1162,8 @@ async def _run_index_pending_statuses(
     return result_payload
 
 
-@knowledge.post("/databases/{kb_id}/documents/parse")
-async def parse_documents(kb_id: str, file_ids: list[str] = Body(...), current_user: User = Depends(get_admin_user)):
-    """手动触发文档解析"""
-    file_ids = _validate_direct_document_action_file_ids(file_ids)
-    logger.debug(f"Parse documents for kb_id {kb_id}: {file_ids}")
-    await _ensure_database_supports_documents(kb_id, "文档解析")
+async def _enqueue_parse_task(kb_id: str, file_ids: list[str], operator_id: str, db_info: dict) -> dict:
+    """提交管理端指定 file_ids 的解析任务。"""
 
     async def run_parse(context: TaskContext):
         try:
@@ -1149,16 +1171,15 @@ async def parse_documents(kb_id: str, file_ids: list[str] = Body(...), current_u
                 context=context,
                 kb_id=kb_id,
                 file_ids=file_ids,
-                operator_id=current_user.uid,
+                operator_id=operator_id,
             )
         except Exception as e:
             logger.exception(f"Parse task failed: {e}")
             raise
 
     try:
-        database = await knowledge_base.get_database_info(kb_id)
         task = await tasker.enqueue(
-            name=f"文档解析 ({database['name']})",
+            name=f"文档解析 ({db_info['name']})",
             task_type="knowledge_parse",
             payload={"kb_id": kb_id, "file_ids": file_ids},
             coroutine=run_parse,
@@ -1168,15 +1189,10 @@ async def parse_documents(kb_id: str, file_ids: list[str] = Body(...), current_u
         return {"message": f"提交失败: {e}", "status": "failed"}
 
 
-@knowledge.post("/databases/{kb_id}/documents/parse-pending")
-async def parse_pending_documents(kb_id: str, current_user: User = Depends(get_admin_user)):
-    """按状态手动触发全部待解析文档解析。"""
-    logger.debug(f"Parse pending documents for kb_id {kb_id}")
-    await _ensure_database_supports_documents(kb_id, "文档解析")
-
+async def _enqueue_parse_pending_task(kb_id: str, operator_id: str, db_info: dict) -> dict:
+    """提交管理端按状态全量待解析任务。"""
     try:
-        database = await knowledge_base.get_database_info(kb_id)
-        pending_count = int((database.get("stats") or {}).get("pending_parse_count") or 0)
+        pending_count = int((db_info.get("stats") or {}).get("pending_parse_count") or 0)
         if pending_count <= 0:
             return {"message": "没有待解析文档", "status": "success", "queued_count": 0}
 
@@ -1187,14 +1203,14 @@ async def parse_pending_documents(kb_id: str, current_user: User = Depends(get_a
                     kb_id=kb_id,
                     statuses=PENDING_PARSE_STATUSES,
                     initial_total=pending_count,
-                    operator_id=current_user.uid,
+                    operator_id=operator_id,
                 )
             except Exception as e:
                 logger.exception(f"Pending parse task failed: {e}")
                 raise
 
         task, created = await tasker.enqueue_unique_by_payload(
-            name=f"待解析文档解析 ({database['name']})",
+            name=f"待解析文档解析 ({db_info['name']})",
             task_type="knowledge_parse",
             payload={
                 "kb_id": kb_id,
@@ -1217,20 +1233,8 @@ async def parse_pending_documents(kb_id: str, current_user: User = Depends(get_a
         return {"message": f"提交失败: {e}", "status": "failed"}
 
 
-@knowledge.post("/databases/{kb_id}/documents/index")
-async def index_documents(
-    kb_id: str,
-    file_ids: list[str] = Body(...),
-    params: dict | None = Body(None),
-    current_user: User = Depends(get_admin_user),
-):
-    """手动触发文档入库（Indexing），支持更新参数"""
-    file_ids = _validate_direct_document_action_file_ids(file_ids)
-    params = params or {}
-    logger.debug(f"Index documents for kb_id {kb_id}: {file_ids} {params=}")
-    await _ensure_database_supports_documents(kb_id, "文档入库")
-
-    operator_id = current_user.uid
+async def _enqueue_index_task(kb_id: str, file_ids: list[str], params: dict, operator_id: str, db_info: dict) -> dict:
+    """提交管理端指定 file_ids 的入库任务。"""
 
     async def run_index(context: TaskContext):
         try:
@@ -1246,9 +1250,8 @@ async def index_documents(
             raise
 
     try:
-        database = await knowledge_base.get_database_info(kb_id)
         task = await tasker.enqueue(
-            name=f"文档入库 ({database['name']})",
+            name=f"文档入库 ({db_info['name']})",
             task_type="knowledge_index",
             payload={"kb_id": kb_id, "file_ids": file_ids, "params": params},
             coroutine=run_index,
@@ -1258,25 +1261,12 @@ async def index_documents(
         return {"message": f"提交失败: {e}", "status": "failed"}
 
 
-@knowledge.post("/databases/{kb_id}/documents/index-pending")
-async def index_pending_documents(
-    kb_id: str,
-    payload: PendingIndexDocumentsRequest | None = None,
-    current_user: User = Depends(get_admin_user),
-):
-    """按状态手动触发全部待入库文档入库。"""
-    params = payload.params if payload else None
-    params = params or {}
-    logger.debug(f"Index pending documents for kb_id {kb_id}: {params=}")
-    await _ensure_database_supports_documents(kb_id, "文档入库")
-
+async def _enqueue_index_pending_task(kb_id: str, params: dict, operator_id: str, db_info: dict) -> dict:
+    """提交管理端按状态全量待入库任务。"""
     try:
-        database = await knowledge_base.get_database_info(kb_id)
-        pending_count = int((database.get("stats") or {}).get("pending_index_count") or 0)
+        pending_count = int((db_info.get("stats") or {}).get("pending_index_count") or 0)
         if pending_count <= 0:
             return {"message": "没有待入库文档", "status": "success", "queued_count": 0}
-
-        operator_id = current_user.uid
 
         async def run_index(context: TaskContext):
             try:
@@ -1293,7 +1283,7 @@ async def index_pending_documents(
                 raise
 
         task, created = await tasker.enqueue_unique_by_payload(
-            name=f"待入库文档入库 ({database['name']})",
+            name=f"待入库文档入库 ({db_info['name']})",
             task_type="knowledge_index",
             payload={
                 "kb_id": kb_id,
@@ -1315,6 +1305,51 @@ async def index_pending_documents(
         }
     except Exception as e:
         return {"message": f"提交失败: {e}", "status": "failed"}
+
+
+@knowledge.post("/databases/{kb_id}/documents/parse")
+async def parse_documents(kb_id: str, file_ids: list[str] = Body(...), current_user: User = Depends(get_admin_user)):
+    """手动触发文档解析"""
+    file_ids = _validate_direct_document_action_file_ids(file_ids)
+    logger.debug(f"Parse documents for kb_id {kb_id}: {file_ids}")
+    db_info = await _ensure_database_supports_documents(kb_id, "文档解析")
+    return await _enqueue_parse_task(kb_id, file_ids, current_user.uid, db_info)
+
+
+@knowledge.post("/databases/{kb_id}/documents/parse-pending")
+async def parse_pending_documents(kb_id: str, current_user: User = Depends(get_admin_user)):
+    """按状态手动触发全部待解析文档解析。"""
+    logger.debug(f"Parse pending documents for kb_id {kb_id}")
+    db_info = await _ensure_database_supports_documents(kb_id, "文档解析")
+    return await _enqueue_parse_pending_task(kb_id, current_user.uid, db_info)
+
+
+@knowledge.post("/databases/{kb_id}/documents/index")
+async def index_documents(
+    kb_id: str,
+    file_ids: list[str] = Body(...),
+    params: dict | None = Body(None),
+    current_user: User = Depends(get_admin_user),
+):
+    """手动触发文档入库（Indexing），支持更新参数"""
+    file_ids = _validate_direct_document_action_file_ids(file_ids)
+    params = params or {}
+    logger.debug(f"Index documents for kb_id {kb_id}: {file_ids} {params=}")
+    db_info = await _ensure_database_supports_documents(kb_id, "文档入库")
+    return await _enqueue_index_task(kb_id, file_ids, params, current_user.uid, db_info)
+
+
+@knowledge.post("/databases/{kb_id}/documents/index-pending")
+async def index_pending_documents(
+    kb_id: str,
+    payload: PendingIndexDocumentsRequest | None = None,
+    current_user: User = Depends(get_admin_user),
+):
+    """按状态手动触发全部待入库文档入库。"""
+    params = (payload.params if payload else None) or {}
+    logger.debug(f"Index pending documents for kb_id {kb_id}: {params=}")
+    db_info = await _ensure_database_supports_documents(kb_id, "文档入库")
+    return await _enqueue_index_pending_task(kb_id, params, current_user.uid, db_info)
 
 
 @knowledge.get("/databases/{kb_id}/documents/{doc_id}")

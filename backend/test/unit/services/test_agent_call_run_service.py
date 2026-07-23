@@ -17,10 +17,23 @@ class _NoExistingRunRepo:
         return None
 
 
+class _NoExistingRequestRepo:
+    def __init__(self, db):
+        self.db = db
+
+    async def get_by_request_id(self, request_id: str):
+        del request_id
+        return None
+
+
 @pytest.mark.asyncio
 async def test_create_agent_invocation_run_creates_invocation_metadata(monkeypatch: pytest.MonkeyPatch):
     calls: dict[str, object] = {}
     current_user = SimpleNamespace(uid="user-1", role="user")
+
+    class Db:
+        async def commit(self):
+            calls["committed"] = True
 
     class AgentRepo:
         def __init__(self, db):
@@ -29,7 +42,7 @@ async def test_create_agent_invocation_run_creates_invocation_metadata(monkeypat
         async def get_visible_by_slug(self, *, slug: str, user, kind="main"):
             assert kind == "main"
             assert user is current_user
-            return SimpleNamespace(slug=slug)
+            return SimpleNamespace(slug=slug, backend_id="ChatbotAgent")
 
     class ConvRepo:
         def __init__(self, db):
@@ -49,19 +62,29 @@ async def test_create_agent_invocation_run_creates_invocation_metadata(monkeypat
             }
             return SimpleNamespace(id=1, thread_id=thread_id)
 
-    async def fake_create_agent_run_view(**kwargs):
-        calls["run_kwargs"] = kwargs
-        return {
-            "run_id": "run-1",
-            "thread_id": kwargs["thread_id"],
-            "status": "pending",
-            "request_id": kwargs["meta"]["request_id"],
-        }
+    async def fake_intake_request(**kwargs):
+        calls["intake_kwargs"] = kwargs
+        return SimpleNamespace(
+            request_id="req-1",
+            status="dispatched",
+            queue_policy="enqueue",
+            queue_position=0,
+            message_id=1,
+            run_id="run-1",
+            thread_id="thread-1",
+        )
+
+    async def fake_enqueue_agent_run(*, db, intake):
+        await db.commit()
+        calls["enqueued"] = intake.run_id
 
     monkeypatch.setattr(svc, "AgentRepository", AgentRepo)
     monkeypatch.setattr(svc, "AgentRunRepository", _NoExistingRunRepo)
+    monkeypatch.setattr(svc, "AgentRunRequestRepository", _NoExistingRequestRepo)
     monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
-    monkeypatch.setattr(svc, "create_agent_run_view", fake_create_agent_run_view)
+    monkeypatch.setattr(svc.agent_manager, "get_agent", lambda _backend_id: object())
+    monkeypatch.setattr(svc, "intake_request", fake_intake_request)
+    monkeypatch.setattr(svc, "finalize_intake", fake_enqueue_agent_run)
 
     result = await svc.create_agent_invocation_run_view(
         agent_slug="translator",
@@ -71,7 +94,7 @@ async def test_create_agent_invocation_run_creates_invocation_metadata(monkeypat
         request_id="req-1",
         model_spec="provider:model",
         current_user=current_user,
-        db=object(),
+        db=Db(),
         conversation_title="Agent Call Run",
     )
 
@@ -79,16 +102,83 @@ async def test_create_agent_invocation_run_creates_invocation_metadata(monkeypat
         "source": "agent_call",
         "agent_invocation_meta": {"trace_id": "trace-1"},
     }
-    assert calls["run_kwargs"]["input_message"].content == "Hello World"
-    assert calls["run_kwargs"]["model_spec"] == "provider:model"
-    assert calls["run_kwargs"]["meta"] == {
+    assert calls["intake_kwargs"]["input_message"].content == "Hello World"
+    assert calls["intake_kwargs"]["model_spec"] == "provider:model"
+    assert calls["intake_kwargs"]["meta"] == {
         "request_id": "req-1",
         "source": "agent_call",
         "agent_invocation_meta": {"trace_id": "trace-1"},
     }
     assert result["run_id"] == "run-1"
     assert result["thread_id"] == "thread-1"
-    assert result["status"] == "pending"
+    assert result["status"] == "dispatched"
+    assert calls["committed"] is True
+    assert calls["enqueued"] == "run-1"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_invocation_run_rejects_existing_request_from_explicit_other_thread(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    current_user = SimpleNamespace(uid="user-1", role="user")
+
+    class AgentRepo:
+        def __init__(self, db):
+            del db
+
+        async def get_visible_by_slug(self, *, slug: str, user, kind="main"):
+            del user, kind
+            return SimpleNamespace(slug=slug, backend_id="ChatbotAgent")
+
+    class ExistingRequestRepo:
+        def __init__(self, db):
+            del db
+
+        async def get_by_request_id(self, request_id: str):
+            assert request_id == "req-1"
+            return SimpleNamespace(
+                uid="user-1",
+                agent_slug="translator",
+                conversation_thread_id="persisted-thread",
+                source="agent_call",
+                queue_policy="enqueue",
+            )
+
+    class NoExistingRunRepo:
+        def __init__(self, db):
+            del db
+
+        async def get_run_by_request_id(self, request_id: str):
+            assert request_id == "req-1"
+            return None
+
+    class FailConversationRepo:
+        def __init__(self, db):
+            del db
+
+        async def get_conversation_by_thread_id(self, thread_id: str):
+            raise AssertionError(f"scope conflict must fail before conversation lookup: {thread_id}")
+
+    monkeypatch.setattr(svc, "AgentRepository", AgentRepo)
+    monkeypatch.setattr(svc, "AgentRunRequestRepository", ExistingRequestRepo)
+    monkeypatch.setattr(svc, "AgentRunRepository", NoExistingRunRepo)
+    monkeypatch.setattr(svc, "ConversationRepository", FailConversationRepo)
+
+    with pytest.raises(HTTPException) as exc:
+        await svc.create_agent_invocation_run_view(
+            agent_slug="translator",
+            input_message=build_chat_input_message("Hello World"),
+            invocation_metadata={"source": "agent_call"},
+            requested_thread_id="requested-thread",
+            request_id="req-1",
+            model_spec=None,
+            current_user=current_user,
+            db=object(),
+            conversation_title="Agent Call Run",
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "request_id_conflict"
 
 
 @pytest.mark.asyncio
@@ -108,7 +198,7 @@ async def test_create_agent_call_run_does_not_commit_conversation_before_run_cre
 
         async def get_visible_by_slug(self, *, slug: str, user, kind="main"):
             del user, kind
-            return SimpleNamespace(slug=slug)
+            return SimpleNamespace(slug=slug, backend_id="ChatbotAgent")
 
     class ConvRepo:
         def __init__(self, db):
@@ -131,13 +221,15 @@ async def test_create_agent_call_run_does_not_commit_conversation_before_run_cre
         async def create_conversation(self, **_kwargs):
             raise AssertionError("agent-call conversation must not be committed before run creation")
 
-    async def fake_create_agent_run_view(**_kwargs):
+    async def fake_intake_request(**_kwargs):
         raise HTTPException(status_code=422, detail="未找到可用聊天模型: 'missing:model'")
 
     monkeypatch.setattr(svc, "AgentRepository", AgentRepo)
     monkeypatch.setattr(svc, "AgentRunRepository", _NoExistingRunRepo)
+    monkeypatch.setattr(svc, "AgentRunRequestRepository", _NoExistingRequestRepo)
     monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
-    monkeypatch.setattr(svc, "create_agent_run_view", fake_create_agent_run_view)
+    monkeypatch.setattr(svc.agent_manager, "get_agent", lambda _backend_id: object())
+    monkeypatch.setattr(svc, "intake_request", fake_intake_request)
 
     with pytest.raises(HTTPException) as exc:
         await svc.create_agent_invocation_run_view(
@@ -206,6 +298,107 @@ async def test_create_agent_call_run_parses_openai_content_and_returns_async_pay
         "source": "agent_call",
         "agent_invocation_meta": {"trace_id": "trace-1"},
     }
+    assert calls["run_kwargs"]["queue_policy"] == "enqueue"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_call_run_returns_queued_request_for_async_mode(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_create_agent_invocation_run_view(**kwargs):
+        return {
+            "run_id": None,
+            "thread_id": "thread-1",
+            "status": "queued",
+            "request_id": kwargs["request_id"],
+            "queue_policy": kwargs["queue_policy"],
+            "queue_position": 2,
+            "request_events_url": "/api/agent/requests/req-1/events",
+        }
+
+    monkeypatch.setattr(svc, "create_agent_invocation_run_view", fake_create_agent_invocation_run_view)
+
+    result = await svc.create_agent_call_run_view(
+        agent_slug="translator",
+        messages=[{"role": "user", "content": "Hello"}],
+        agent_call_meta={},
+        requested_thread_id="thread-1",
+        request_id="req-1",
+        model_spec=None,
+        async_mode=True,
+        stream=False,
+        current_user=SimpleNamespace(uid="user-1", role="user"),
+        db=object(),
+    )
+
+    assert result["status"] == "queued"
+    assert result["run_id"] is None
+    assert result["queue_position"] == 2
+
+
+@pytest.mark.asyncio
+async def test_create_agent_call_run_rejects_enqueue_for_sync_mode():
+    with pytest.raises(HTTPException) as exc:
+        await svc.create_agent_call_run_view(
+            agent_slug="translator",
+            messages=[{"role": "user", "content": "Hello"}],
+            agent_call_meta={},
+            requested_thread_id="thread-1",
+            request_id="req-1",
+            model_spec=None,
+            async_mode=False,
+            queue_policy="enqueue",
+            stream=False,
+            current_user=SimpleNamespace(uid="user-1", role="user"),
+            db=object(),
+        )
+
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_agent_call_run_returns_rejected_request_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_create_agent_invocation_run_view(**kwargs):
+        return {
+            "run_id": None,
+            "thread_id": "thread-1",
+            "status": "rejected",
+            "request_id": kwargs["request_id"],
+            "queue_policy": kwargs["queue_policy"],
+            "queue_position": None,
+            "request_events_url": None,
+        }
+
+    async def fail_await_agent_run_result(**_kwargs):
+        raise AssertionError("rejected sync request must not wait for a run result")
+
+    monkeypatch.setattr(svc, "create_agent_invocation_run_view", fake_create_agent_invocation_run_view)
+    monkeypatch.setattr(svc, "await_agent_run_result", fail_await_agent_run_result)
+
+    result = await svc.create_agent_call_run_view(
+        agent_slug="translator",
+        messages=[{"role": "user", "content": "Hello"}],
+        agent_call_meta={},
+        requested_thread_id="thread-1",
+        request_id="req-1",
+        model_spec=None,
+        async_mode=False,
+        stream=False,
+        current_user=SimpleNamespace(uid="user-1", role="user"),
+        db=object(),
+    )
+
+    assert result == {
+        "run_id": None,
+        "thread_id": "thread-1",
+        "status": "rejected",
+        "request_id": "req-1",
+        "queue_policy": "reject",
+        "queue_position": None,
+        "request_events_url": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -256,6 +449,7 @@ async def test_create_agent_call_run_waits_and_wraps_final_result(monkeypatch: p
     assert result["choices"][0]["finish_reason"] == "stop"
     assert result["usage"] == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
     assert calls["await_kwargs"] == {"run_id": "run-1", "current_uid": "user-1"}
+    assert calls["run_kwargs"]["queue_policy"] == "reject"
 
 
 @pytest.mark.asyncio
@@ -295,6 +489,7 @@ async def test_create_agent_eval_run_leaves_thread_resolution_to_invocation_help
     assert result["status"] == "completed"
     assert calls["run_kwargs"]["requested_thread_id"] == ""
     assert calls["run_kwargs"]["request_id"] == "eval-req"
+    assert calls["run_kwargs"]["queue_policy"] == "reject"
     assert calls["await_kwargs"] == {"run_id": "run-1", "current_uid": "user-1"}
 
 

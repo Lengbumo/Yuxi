@@ -8,8 +8,6 @@
 4. 错误矩阵:UserResolveError/HTTPException/RunTimeoutError -> error phase
 5. chat_id 串行锁避免 thread busy
 
-im-worker 不通过 HTTP 调 api,直接复用 api/worker 共享的 service 层函数,
-与普通 chat 走同一条 AgentRun 创建 + enqueue 路径,Agent 执行由 arq worker 完成。
 """
 from __future__ import annotations
 
@@ -257,13 +255,13 @@ class ChannelManager:
                     msg.channel_name, msg.user_id, msg.user_name, matched.uid,
                 )
                 yuxi_uid = matched.uid
-                text = f"已关联账号 {matched.username},开始对话..."
+                text = f"已关联账号 {matched.username},可以开始对话了"
             else:
                 # 未命中:自动创建新用户
                 yuxi_uid, api_key = await self.store.create_user(
                     msg.channel_name, msg.user_id, msg.user_name,
                 )
-                text = "已创建新账号,开始对话..."
+                text = "已创建新账号,可以开始对话了"
         except Exception:
             logger.exception("[Manager] account linking failed")
             await self._publish_error(msg, "⚠️ 账号匹配失败,请稍后重试或联系管理员")

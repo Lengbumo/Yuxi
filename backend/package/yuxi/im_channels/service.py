@@ -3,8 +3,7 @@
 从 IMConfig 读取配置,启动所有 enabled 的 Channel 与 ChannelManager。
 ChannelManager 消费 MessageBus 的 inbound,Channel 负责与 IM 平台收发。
 
-im-worker 不通过 HTTP 调 api,ChannelManager 直接复用 api/worker 共享的 service
-层函数(create_agent_invocation_run_view 等)提交 AgentRun,经 Redis 队列由 arq
+im-worker 直接复用 api/worker 共享的 service层函数(create_agent_invocation_run_view 等)提交 AgentRun,经 Redis 队列由 arq
 worker 执行。ChannelService 持有 session_factory 供 manager/commands 开 session。
 """
 from __future__ import annotations

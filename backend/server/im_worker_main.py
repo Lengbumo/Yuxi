@@ -41,7 +41,6 @@ async def main() -> None:
         logger.info("[im-worker] IM_WORKER_ENABLED=false, exit")
         return
 
-    # 复用 Yuxi 现有 db session factory:pg_manager.AsyncSession 是 async_sessionmaker,
     # 调用后返回新 AsyncSession,与 ChannelStore._session() 期望一致
     from yuxi.storage.postgres.manager import pg_manager
 
@@ -49,7 +48,6 @@ async def main() -> None:
     session_factory = pg_manager.AsyncSession
 
     # resolve_fn:首次解析 IM 用户时调 user_service.resolve_im_user 直接建 Yuxi 用户 + API Key,
-    # 不通过 HTTP(im-worker 与 api 共享 yuxi 包,直接调 service 层)。
     async def resolve_fn(channel: str, im_user_id: str, im_user_name: str) -> tuple[str, str]:
         async with session_factory() as session:
             return await user_service.resolve_im_user(

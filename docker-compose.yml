@@ -125,6 +125,44 @@ services:
       sandbox-provisioner:
         condition: service_healthy
 
+  im-worker:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: yuxi-api:${YUXI_VERSION:-0.7.1.beta1}
+    container_name: im-worker-dev
+    working_dir: /app
+    volumes:
+      - ./backend/server:/app/server
+      - ./backend/package:/app/package
+      - ./docker/volumes/yuxi:/app/saves
+      - ./.env:/app/.env
+    networks:
+      - app-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      <<: *api-worker-env
+      IM_WORKER_ENABLED: ${IM_WORKER_ENABLED:-false}
+      IM_FEISHU_ENABLED: ${IM_FEISHU_ENABLED:-false}
+      IM_FEISHU_APP_ID: ${IM_FEISHU_APP_ID:-}
+      IM_FEISHU_APP_SECRET: ${IM_FEISHU_APP_SECRET:-}
+      IM_DINGTALK_ENABLED: ${IM_DINGTALK_ENABLED:-false}
+      IM_DINGTALK_APP_KEY: ${IM_DINGTALK_APP_KEY:-}
+      IM_DINGTALK_APP_SECRET: ${IM_DINGTALK_APP_SECRET:-}
+      IM_DEFAULT_AGENT_SLUG: ${IM_DEFAULT_AGENT_SLUG:-default-chatbot}
+    command: uv run --no-sync --no-dev python -m server.im_worker_main
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   sandbox-provisioner:
     build:
       context: ./docker/sandbox_provisioner

@@ -11,6 +11,7 @@ from sqlalchemy.orm import declarative_base
 from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES
 from yuxi.storage.postgres.models_business import Base as BusinessBase
 from yuxi.storage.postgres.models_knowledge import Base as KnowledgeBase
+from yuxi.im_channels import models as _im_channels_models  # noqa: F401  注册 IM 渠道表到 BusinessBase.metadata
 from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 

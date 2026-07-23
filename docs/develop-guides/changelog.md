@@ -34,6 +34,8 @@
 
 ### 开发记录
 
+- IM 渠道接入(飞书/钉钉):im-worker 进程维持 IM 平台 WebSocket 长连接(lark-oapi / dingtalk-stream),用户在 IM 内 @机器人 调用 Yuxi Agent;IM 用户首次发言自动创建 Yuxi 用户并归入 IM 默认部门,会话按单聊按人/群聊按群映射 conversation thread(`source='im_channel'`),Agent 运行经 Redis 队列由 arq worker 执行(与普通 chat 同路径),支持 `/help` `/new` `/status` `/agent list` `/agent use <slug>` `/cancel` 命令,同一 chat_id 串行避免 thread busy,出站消息按 pending/streaming/final/error 阶段推送(飞书卡片原地 patch 流式更新,钉钉 pending->final 两步)。
+
 - 修复 Milvus 知识图谱子图查询忽略 `max_depth` 的问题：查询会按请求深度展开路径，并完整返回路径中的中间节点与关系；排除 Chunk 时同时限制整条路径，避免通过 Chunk 间接扩展。路径结果继续遵循现有节点和边数量上限。
 
 - 修复线程文件接口的同步文件 I/O 阻塞：交付物预览仅异步读取媒体类型识别所需的 512 字节文件头，不再同步加载完整文件；线程文件全文读取和目录扫描下沉到工作线程，避免大文件或大目录并发访问时阻塞 API 事件循环。

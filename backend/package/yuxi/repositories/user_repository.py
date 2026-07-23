@@ -88,6 +88,14 @@ class UserRepository:
             await session.refresh(user)
         return user
 
+    async def create_with_db(self, db: AsyncSession, data: dict[str, Any]) -> User:
+        """创建用户(使用外部 session,保证跨表事务原子性)。"""
+        user = User(**data)
+        db.add(user)
+        await db.flush()
+        await db.refresh(user)
+        return user
+
     async def update(self, id: int, data: dict[str, Any]) -> User | None:
         """更新用户"""
         async with pg_manager.get_async_session_context() as session:
